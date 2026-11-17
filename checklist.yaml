@@ -1,0 +1,200 @@
+# checklist.yaml — Issue #2 流量控制后台任务清单
+# 只追加不改删；状态流转 pending → in_progress → complete/failed/archived
+# 标 complete 前必须填 evidence（指向 run-log.md 条目）
+
+tasks:
+  # ── M1: Provider 核心与加密存储 ──────────────────────────
+  - id: M1-1
+    milestone: M1
+    title: 仓库脚手架（go module、目录结构、cobra CLI 骨架、CI workflow、Makefile）
+    status: pending
+    acceptance: >
+      go build ./... 成功；agentvault --help 显示子命令骨架；.github/workflows/ci.yml
+      存在且含 go test + go vet + gofmt 检查；make test 可运行
+    evidence: ""
+
+  - id: M1-2
+    milestone: M1
+    title: Provider 实体模型与 SQLite schema（迁移机制，表 providers/keys）
+    status: pending
+    acceptance: >
+      go test ./internal/provider 通过：建库迁移成功、provider 增删查、
+      key 状态流转（active/disabled/revoked）正确；migration 版本表存在且可重复执行幂等
+    evidence: ""
+
+  - id: M1-3
+    milestone: M1
+    title: SecretStore 抽象 + go-keyring 实现 + 测试用内存后端
+    status: pending
+    acceptance: >
+      go test ./internal/secret 通过：Set/Get/Delete 往返、按 provider+key-id 隔离、
+      内存后端可在无钥匙链环境（CI）运行；DB 与配置文件中无 secret 内容
+    evidence: ""
+
+  - id: M1-4
+    milestone: M1
+    title: AES-GCM 数据加密层（DEK 存钥匙链，信封加密）
+    status: pending
+    acceptance: >
+      go test ./internal/crypto 通过：加解密往返、篡改密文报错、DEK 从 SecretStore
+      获取；随机性测试（同明文两次加密密文不同）
+    evidence: ""
+
+  - id: M1-5
+    milestone: M1
+    title: 控制面 CLI（provider add/list/show/revoke，key 录入经 stdin 不回显）
+    status: pending
+    acceptance: >
+      用临时 HOME+内存 secret 后端跑 CLI 集成测试：add 后 list/show 可见元数据、
+      revoke 后 key 状态为 revoked 且路由层不可见；终端输出与 --json 均不含明文 key
+    evidence: ""
+
+  - id: M1-6
+    milestone: M1
+    title: 密钥泄漏扫描测试（仓库/日志/DB/错误信息断言无明文 key）
+    status: pending
+    acceptance: >
+      go test 运行泄漏扫描：向系统注入测试 key 后 grep 检查源码树、测试日志输出、
+      sqlite 文件字节、CLI 输出均无该 key；M1 全量测试绿
+    evidence: ""
+
+  # ── M2: 本地代理与多 key 路由 ────────────────────────────
+  - id: M2-1
+    milestone: M2
+    title: OpenAI 兼容代理 HTTP 服务（仅绑 127.0.0.1，/v1/chat/completions、/v1/models）
+    status: pending
+    acceptance: >
+      集成测试：httptest mock 上游下 curl /v1/chat/completions 返回 200 且响应体
+      为 OpenAI chat 格式；绑定地址断言拒绝非回环接口；panic 有 recover 不 crash
+    evidence: ""
+
+  - id: M2-2
+    milestone: M2
+    title: 进程内 key 注入（从 SecretStore 解密取 key，请求后不留存内存副本超时清除）
+    status: pending
+    acceptance: >
+      测试断言上游收到的 Authorization 为正确 key；代理日志与错误响应中不含 key；
+      key 缓存有 TTL，过期后重新从 SecretStore 读取
+    evidence: ""
+
+  - id: M2-3
+    milestone: M2
+    title: 多 key 路由策略（round-robin + 429/5xx 故障切换 + key 冷却）
+    status: pending
+    acceptance: >
+      测试矩阵：key A 返回 429 → 同一请求切 key B 成功且 A 进入冷却期不再被选；
+      冷却到期后 A 恢复参与；全部 key 不可用时返回 503 与结构化错误体
+    evidence: ""
+
+  - id: M2-4
+    milestone: M2
+    title: SSE streaming 透传
+    status: pending
+    acceptance: >
+      mock 上游返回 stream=true 的 SSE，代理逐块透传且首字节延迟无明显缓冲；
+      流中途上游断开时客户端收到错误帧而非挂死
+    evidence: ""
+
+  - id: M2-5
+    milestone: M2
+    title: 代理生命周期 CLI（serve/stop/status + 冷却状态观测）
+    status: pending
+    acceptance: >
+      agentvault serve 后台启动并写 pid 文件；status 报告端口/各 key 健康与冷却状态；
+      stop 优雅退出；M2 全量测试绿 + 手动 curl 冒烟记录进 run-log
+    evidence: ""
+
+  # ── M3: 用量统计与流量控制 ────────────────────────────────
+  - id: M3-1
+    milestone: M3
+    title: 调用级用量记录（provider/model/key-id/tokens/latency/status，WAL 模式）
+    status: pending
+    acceptance: >
+      集成测试：经代理的一次调用产生一条 usage 记录，字段完整；并发 50 请求无锁死、
+      记录数正确
+    evidence: ""
+
+  - id: M3-2
+    milestone: M3
+    title: 用量查询 CLI（agentvault usage，按 provider/key/时间窗过滤，--json）
+    status: pending
+    acceptance: >
+      集成测试：插入 N 条记录后查询输出与 SQL 直查一致；过滤条件正确；输出无敏感字段
+    evidence: ""
+
+  - id: M3-3
+    milestone: M3
+    title: 配额控制（per-provider / per-key 令牌窗口，超限 429）
+    status: pending
+    acceptance: >
+      设 quota 后窗口内超限请求返回 429 与 quota 错误体；窗口滚动后恢复；
+      per-key 与 per-provider 两级独立生效
+    evidence: ""
+
+  - id: M3-4
+    milestone: M3
+    title: 熔断与冷却观测（错误率熔断、CLI 可查、恢复探测）
+    status: pending
+    acceptance: >
+      连续错误达阈值触发熔断且半开探测恢复的测试通过；status 输出含熔断/冷却态
+    evidence: ""
+
+  # ── M4: 明文迁移与接入替换（按消费方式三分类）──────────────
+  - id: M4-1
+    milestone: M4
+    title: 明文扫描器（探测 shell rc、.env、litellm config、agent 工具设置/MCP env 块；按消费方式三分类）
+    status: pending
+    acceptance: >
+      在含测试 fixture（假 key 格式）的临时 HOME 下：扫描器输出每处命中的
+      文件路径/行号/变量名/key 指纹（前后 4 位掩码）与分类标签
+      （proxy-attach / run-inject / compliant），不输出完整明文；未命中时正常退出码
+    evidence: ""
+
+  - id: M4-2
+    milestone: M4
+    title: import 导入命令（预览变更清单 → 用户确认 → 入钥匙链 + 原文件改写 + .bak 备份）
+    status: pending
+    acceptance: >
+      集成测试：import 预览模式只读不改文件；确认后 key 进 SecretStore、
+      原文件按分类改写（proxy-attach 类换 base_url、run-inject 类注释化/移除明文行）、
+      生成 .bak 且与原文件 diff 可验证；拒绝时零改动
+    evidence: ""
+
+  - id: M4-3
+    milestone: M4
+    title: proxy-attach 接入改写（LLM 客户端 base_url 指向本地代理，shell rc 注释化 export 行）
+    status: pending
+    acceptance: >
+      测试断言：改写后 .zshrc 中 export 行被注释并附 agentvault 提示、
+      litellm/claude settings 等支持 base_url 的配置指向 http://127.0.0.1:<port>；
+      改写后环境无明文 key，代理可用该客户端语义完成一次 mock 调用
+    evidence: ""
+
+  - id: M4-4
+    milestone: M4
+    title: run-inject：agentvault run 命令（从钥匙链解密注入子进程环境变量，配置不落明文）
+    status: pending
+    acceptance: >
+      agentvault run --env VAR=ref:provider/key -- printenv VAR 输出正确值且
+      父进程环境无该变量；测试断言 run 包装下子进程可见注入变量、
+      配置文件与输出均无明文；支持包装 MCP server 启动命令（codex env 块场景）
+    evidence: ""
+
+  - id: M4-5
+    milestone: M4
+    title: 迁移报告（三分类汇总 + run-inject 类的一工具一 key 隔离策略指引）
+    status: pending
+    acceptance: >
+      agentvault import --report 输出三分类迁移状态汇总，run-inject 类附
+      专用 key 录入与 wrapper 配置示例指引；报告不含明文 key；真机（用户本机）
+      试运行记录进 run-log（改写用户点文件前属决策节点 3，需人批准）
+    evidence: ""
+
+  - id: M3-5
+    milestone: M3
+    title: 文档收尾（README 使用指南、docs/design/survey.md 借鉴项目调研、docs/design/architecture.md）
+    status: pending
+    acceptance: >
+      README 含安装/录入 key/启动代理/接入客户端四步示例；survey.md 给出
+      new-api/one-api/bricks-llm/LiteLLM 的可借鉴点与本项目取舍；全量套件重跑绿
+    evidence: ""
