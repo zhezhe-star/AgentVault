@@ -28,22 +28,54 @@ AgentVault 定位为本地加密 API key 管理项目（起因：OpenCode 密钥
 即可用请求；代理按策略在多把 key/多个 provider 间路由、故障切换与冷却，并把
 每次调用的 token 用量记入本地库供查询与限额。
 
-## 「完成」的度量判据
+## 「完成」的度量判据（外部视角优先）
 
-1. `go test ./...` 全绿，含密钥泄漏扫描测试（断言仓库、日志、SQLite 内容、代理响应中不出现明文 key）。
-2. 端到端冒烟：CLI 录入 mock provider（本地 httptest 上游）→ 代理启动 → curl 发起 chat completion → 返回 200 且响应为 OpenAI 格式。
-3. 多 key 路由用例：上游对 key A 返回 429 → 代理自动切 key B 成功，且 A 进入冷却不再被选。
-4. 用量用例：上述调用后，`agentvault usage` 能查到本次调用的 provider/model/tokens 记录；为 provider 设 quota 后超限请求被 429 拒绝。
-5. `go vet ./...`、`gofmt -l .` 干净。
+**外部可感知判据（真机）**
+
+1. **M2 末真机迁移**：`~/.claude/settings.json` 中不再出现 GLM key 明文
+   （`grep` 对比前后 + .bak diff 记入 run-log）；迁移后的 Claude Code 经代理完成
+   一次真实会话；浏览器打开控制面首页能看到该 provider、key 与模型的真实数据
+   （截图进 `docs/tasks/`，同时复制到 worktree 根 `tmp-m2-screenshots/`）。
+2. **M3 末真实流量证据**：前端 token 统计显示的是迁移后真实使用的累计值
+   （非 mock），与 `agentvault usage` 查询一致；配额真实生效一次（可观测的 429）。
+3. **M4 末清零复核**：扫描器真机运行输出本地明文 key 落盘点为 0（run-log 附
+   扫描输出），`.zshrc`/litellm/codex 全部迁移完成。
+
+**内部工程判据**
+
+4. `go test ./...` 全绿，含密钥泄漏扫描测试（断言仓库、日志、SQLite 内容、代理响应中不出现明文 key）。
+5. 端到端冒烟：CLI 录入 mock provider（本地 httptest 上游）→ 代理启动 → curl 发起 chat completion → 返回 200 且响应为 OpenAI 格式。
+6. 多 key 路由用例：上游对 key A 返回 429 → 代理自动切 key B 成功，且 A 进入冷却不再被选。
+7. 用量用例：调用后 `agentvault usage` 能查到 provider/model/tokens 记录；quota 超限请求被 429 拒绝。
+8. `go vet ./...`、`gofmt -l .` 干净。
 
 ## 非目标（本轮不做）
 
-- 不做 Web 图形控制台（后续 issue）。
 - 不做多用户/网络多租户：代理只监听 127.0.0.1，单机单用户。
 - 不做计费/成本换算报表（只记 token 数）。
 - 不引入 LiteLLM/Python 运行时依赖。
 - 不做云端同步、团队共享 key。
 - 不追求覆盖全部 provider 私有 API 格式，仅 OpenAI 兼容格式（+ 可配置 base_url 的 OpenAI 兼容上游）。
+
+## 「上线」与反馈数据时间线（2026-11-17 评审：验收必须外部可感知）
+
+本项目首要目标是**清理本地明文 key**，所以「上线」= 本机真实使用（dogfood）：
+
+- **M2 末 = 第一次上线**：真机替换第一处明文（`~/.claude/settings.json` 的 GLM
+  key → 代理），Claude Code 经代理实际工作；代理从此常驻，用量库开始积累真实
+  feedback 数据。控制面前端 v0 同步上线，展示真实数据。
+- **M3 末**：配额/熔断在真实流量下验证；前端 token 统计展示真机数据。
+- **M4 末 = 最终验收**：`~/.zshrc`、litellm config、codex MCP 全部迁移，扫描器
+  复核本地明文 key 清零 —— 项目首要目标的可感知完成。
+
+## 控制面前端（v1 必含）
+
+Go 二进制内嵌静态页（`net/http` + embed，无重型前端框架），本地
+`http://127.0.0.1:<port>/` 展示三级视图（真机数据，禁止 mock 数据演示）：
+
+1. 有哪些 provider；
+2. 每个 provider 的每把 key 挂了哪些模型；
+3. 每个模型累计消耗的 token 数。
 
 ## 明文迁移策略（按消费方式三分类，2026-11-17 基于真机扫描确认）
 
@@ -84,16 +116,22 @@ Provider 实体模型、SQLite schema（迁移机制）、`SecretStore` 抽象 +
 AES-GCM 数据加密层、控制面 CLI（provider add/list/show/revoke）、密钥泄漏扫描测试。
 **验收证据**：`go test ./...` 含泄漏扫描全绿；CLI 端到端录入/吊销演示输出。
 
-### M2 — 本地代理与多 key 路由（约 5 任务）
+### M2 — 本地代理、多 key 路由与第一次真机上线（约 7 任务）
 OpenAI 兼容 HTTP 代理服务（127.0.0.1）、进程内取 key 注入上游请求、
-轮询/加权路由策略、429/5xx 故障切换与 key 冷却、streaming (SSE) 透传。
-**验收证据**：httptest mock 上游的集成测试矩阵全绿；手动 curl 冒烟记录。
+轮询/加权路由策略、429/5xx 故障切换与 key 冷却、streaming (SSE) 透传、
+**控制面前端 v0**（provider → key → 模型三级视图，内嵌静态页，此时 token 列
+可为 0）、最小迁移路径（手工方式：把 `~/.claude/settings.json` 的 GLM key 录入
+钥匙链并指向代理）。
+**验收证据（外部可感知）**：mock 上游集成测试矩阵全绿；**真机替换第一处明文**
+——settings.json grep 前后对比 + Claude Code 经代理真实会话 + 前端展示真实
+provider/key/模型（截图），全部记入 run-log。
 
-### M3 — 用量统计与流量控制（约 5 任务）
+### M3 — 用量统计、流量控制与前端数据闭环（约 5 任务）
 调用级用量记录（provider/model/tokens/latency/status）、`agentvault usage` 查询、
 per-provider / per-key 配额（窗口期 + 超限 429）、熔断统计与冷却观测、
-README/设计文档（含借鉴项目调研结论 docs/design/survey.md）。
-**验收证据**：配额超限测试、用量查询测试全绿；文档合入。
+前端 token 统计接入真实用量库（三级视图第 3 层生效）。
+**验收证据**：配额/用量测试全绿；前端展示迁移后真实流量累计 token（截图），
+与 usage CLI 一致。
 
 ### M4 — 明文迁移与接入替换（约 5 任务）
 按消费方式三分类的明文扫描器（proxy-attach / run-inject / compliant）、

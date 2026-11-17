@@ -104,6 +104,26 @@ tasks:
       stop 优雅退出；M2 全量测试绿 + 手动 curl 冒烟记录进 run-log
     evidence: ""
 
+  - id: M2-6
+    milestone: M2
+    title: 控制面前端 v0（内嵌静态页：provider → key → 模型三级视图，token 列暂为 0）
+    status: pending
+    acceptance: >
+      浏览器访问 http://127.0.0.1:<port>/ 渲染三级视图；数据来自 SQLite 真实
+      注册信息（禁止 mock 数据）；集成测试断言 API 返回与页面数据一致；
+      仅绑定 127.0.0.1
+    evidence: ""
+
+  - id: M2-7
+    milestone: M2
+    title: 第一次真机迁移（~/.claude/settings.json GLM key → 代理，Claude Code 真实会话）
+    status: pending
+    acceptance: >
+      改写前经决策节点 3 获用户批准；改写后 grep settings.json 无 GLM key 明文
+      （.bak diff 记 run-log）；Claude Code 经代理完成一次真实会话；前端可见该
+      provider/key/模型真实数据；截图存 docs/tasks/ 并复制到 tmp-m2-screenshots/
+    evidence: ""
+
   # ── M3: 用量统计与流量控制 ────────────────────────────────
   - id: M3-1
     milestone: M3
@@ -188,6 +208,16 @@ tasks:
       agentvault import --report 输出三分类迁移状态汇总，run-inject 类附
       专用 key 录入与 wrapper 配置示例指引；报告不含明文 key；真机（用户本机）
       试运行记录进 run-log（改写用户点文件前属决策节点 3，需人批准）
+    evidence: ""
+
+  - id: M3-6
+    milestone: M3
+    title: 前端 token 统计接入真实用量库（三级视图第 3 层生效）
+    status: pending
+    acceptance: >
+      前端每模型 token 数与 agentvault usage / SQL 直查三方一致；展示的是迁移后
+      真实流量累计值（真机截图记 run-log，非 mock）；真实流量下触发一次配额 429
+      并可在前端/CLI 观测
     evidence: ""
 
   - id: M3-5
