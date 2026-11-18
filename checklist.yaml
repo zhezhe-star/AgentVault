@@ -25,11 +25,11 @@ tasks:
   - id: M1-3
     milestone: M1
     title: SecretStore 抽象 + go-keyring 实现 + 测试用内存后端
-    status: pending
+    status: complete
     acceptance: >
       go test ./internal/secret 通过：Set/Get/Delete 往返、按 provider+key-id 隔离、
       内存后端可在无钥匙链环境（CI）运行；DB 与配置文件中无 secret 内容
-    evidence: ""
+    evidence: "[2026-11-18T00:25:00+08:00] go test ./internal/secret ok；往返/隔离/删除测试全过，见 run-log M1-3"
 
   - id: M1-4
     milestone: M1

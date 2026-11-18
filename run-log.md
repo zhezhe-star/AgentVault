@@ -47,3 +47,9 @@
 - 表：providers / keys（status: active|disabled|revoked）/ models（UNIQUE(key_id,name)）+ schema_migrations 前向迁移，Open 可重复执行幂等。
 - 密钥隔离：keys 表只存 secret_id 引用，无明文列。
 - 测试：迁移幂等、provider/key/model 生命周期、状态流转、重复模型 UNIQUE 拒绝 —— `go test ./internal/provider/` ok，vet/gofmt 干净。
+
+## [2026-11-18T00:25:00+08:00] evidence: M1-3 SecretStore 抽象完成
+- Store 接口（Set/Get/Delete）+ KeyringStore（zalando/go-keyring v0.2.8，生产后端）+ MemoryStore（测试/CI）。
+- 服务名命名空间 "agentvault"，按 service/account 隔离；go-keyring.ErrNotFound 映射为包内 ErrNotFound。
+- 测试：往返、账号/服务隔离、删除后 NotFound —— go test ./internal/secret ok；vet/gofmt 干净。
+- MemoryStore 文档明确标注不得用于生产。
