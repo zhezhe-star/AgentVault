@@ -78,3 +78,8 @@
 - keyCache：解密 key 进程内存缓存 TTL 5 分钟，invalidate 支持故障后立即刷新；miss 映射 ErrNotFound。
 - 日志结构化排除：RequestLog 只含 method/path/status/model，header/body/key 构造上不可进入日志（无脱敏逻辑可出错）。
 - 测试：TTL 内不读新值、invalidate 立即刷新、miss 分类、Flush 透传（SSE 不被日志层缓冲）。全仓 6 包 ok，vet/gofmt 干净。
+
+## [2026-11-18T03:30:00+08:00] evidence: M2-3 多 key 路由完成（含 bug 修复一条）
+- router：weight 降序 + keyID 稳定排序的候选列表、round-robin、429/5xx 失败即冷却 60s 并 failover、成功清零、coolingCount 观测。
+- **修复 rr 初值 bug**：map 零值 0 导致首轮跳过第一个候选（debug 测试定位：candidates 顺序正确而 pick 落在 b2），改为缺省视为 -1。
+- 测试：A 429 → 同请求切 B 成功且 A 冷却不再被选（后续 3 请求全走 B）、冷却到期恢复、全部 key 耗尽中继 429、错误体不泄漏。全仓 6 包 ok，vet/gofmt 干净。

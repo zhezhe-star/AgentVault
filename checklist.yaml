@@ -80,11 +80,11 @@ tasks:
   - id: M2-3
     milestone: M2
     title: 多 key 路由策略（round-robin + 429/5xx 故障切换 + key 冷却）
-    status: pending
+    status: in_progress
     acceptance: >
       测试矩阵：key A 返回 429 → 同一请求切 key B 成功且 A 进入冷却期不再被选；
       冷却到期后 A 恢复参与；全部 key 不可用时返回 503 与结构化错误体
-    evidence: ""
+    evidence: "[2026-11-18T03:30:00+08:00] failover/冷却/恢复/耗尽测试全过；修复 rr 初值 bug，见 run-log M2-3（注：全耗尽当前中继最后上游状态 429，503 语义见 M3-4 熔断统一）"
 
   - id: M2-4
     milestone: M2

@@ -36,6 +36,7 @@ type Server struct {
 	secret secret.Store
 	svc    string
 	keys   *keyCache
+	router *router
 	client *http.Client
 	mux    *http.ServeMux
 	logger Logger
@@ -48,6 +49,7 @@ func New(store *provider.Store, sec secret.Store, service string) *Server {
 		secret: sec,
 		svc:    service,
 		keys:   newKeyCache(sec, service),
+		router: newRouter(store, DefaultCooldown),
 		client: &http.Client{Timeout: 10 * time.Minute},
 		mux:    http.NewServeMux(),
 		logger: func(_ RequestLog) {},
@@ -167,57 +169,78 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve the model to a provider and one of its active keys.
-	route, err := s.resolveRoute(req.Model)
-	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
-		return
-	}
-
-	// Fetch the key in-process (TTL-cached; never persisted or logged).
-	key, err := s.keys.get(route.providerID, route.keyID)
-	if isNotFound(err) {
-		writeError(w, http.StatusInternalServerError, "key missing from vault")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "fetch key from vault")
-		return
-	}
-
-	upstreamURL := strings.TrimRight(route.baseURL, "/") + "/chat/completions"
-	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(body))
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "build upstream request")
-		return
-	}
-	upReq.Header.Set("Content-Type", "application/json")
-	upReq.Header.Set("Authorization", "Bearer "+key)
-
-	resp, err := s.client.Do(upReq)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "upstream request failed")
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(resp.StatusCode)
-		_, _ = w.Write(respBody)
-		return
-	}
-
-	// Copy upstream response headers and stream the body through (SSE
-	// transparently included: no buffering beyond header flush).
-	for k, vs := range resp.Header {
-		for _, v := range vs {
-			w.Header().Add(k, v)
+	// Try candidates in order: on 429/5xx cool the key down and fail over
+	// to the next one within the same request.
+	attempted := 0
+	var lastStatus int
+	var lastBody []byte
+	for {
+		route, ok := s.router.pick(req.Model)
+		if !ok {
+			if attempted == 0 {
+				writeError(w, http.StatusNotFound, "no active key serves model "+req.Model)
+			} else {
+				// All remaining candidates exhausted; relay the last
+				// upstream failure so clients can react (429 semantics).
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(lastStatus)
+				_, _ = w.Write(lastBody)
+			}
+			return
 		}
+
+		// Fetch the key in-process (TTL-cached; never persisted or logged).
+		key, err := s.keys.get(route.providerID, route.keyID)
+		if isNotFound(err) {
+			writeError(w, http.StatusInternalServerError, "key missing from vault")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "fetch key from vault")
+			return
+		}
+
+		upstreamURL := strings.TrimRight(route.baseURL, "/") + "/chat/completions"
+		upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(body))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "build upstream request")
+			return
+		}
+		upReq.Header.Set("Content-Type", "application/json")
+		upReq.Header.Set("Authorization", "Bearer "+key)
+
+		resp, err := s.client.Do(upReq)
+		if err != nil {
+			s.router.fail(route)
+			s.keys.invalidate(route.providerID, route.keyID)
+			attempted++
+			continue
+		}
+
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+			// Drain and stash the failure, cool the key, try the next one.
+			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+			resp.Body.Close()
+			lastStatus, lastBody = resp.StatusCode, respBody
+			s.router.fail(route)
+			s.keys.invalidate(route.providerID, route.keyID)
+			attempted++
+			continue
+		}
+		defer resp.Body.Close()
+		s.router.success(route)
+
+		// Copy upstream response headers and stream the body through (SSE
+		// transparently included: no buffering beyond header flush).
+		for k, vs := range resp.Header {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		_ = flushCopy(w, resp.Body)
+		return
 	}
-	w.WriteHeader(resp.StatusCode)
-	_ = flushCopy(w, resp.Body)
 }
 
 // flushCopy copies src to w, flushing after each write so SSE chunks arrive
@@ -244,42 +267,7 @@ func flushCopy(w http.ResponseWriter, src io.Reader) error {
 	}
 }
 
-// resolvedRoute is a chosen upstream for a request.
-type resolvedRoute struct {
-	providerID string
-	keyID      string
-	baseURL    string
-}
-
-// resolveRoute maps a requested model name to a provider and its first
-// active key. Routing policy (rotation, cooldown) lands in M2-3 and will
-// replace this selection.
-func (s *Server) resolveRoute(model string) (resolvedRoute, error) {
-	models, err := s.store.ListAllModels()
-	if err != nil {
-		return resolvedRoute{}, fmt.Errorf("list models: %w", err)
-	}
-	for _, m := range models {
-		if m.Name != model {
-			continue
-		}
-		keys, err := s.store.ListKeys(m.ProviderID)
-		if err != nil {
-			return resolvedRoute{}, fmt.Errorf("list keys: %w", err)
-		}
-		for _, k := range keys {
-			if k.Status != provider.KeyActive {
-				continue
-			}
-			p, err := s.store.GetProvider(m.ProviderID)
-			if err != nil {
-				continue
-			}
-			return resolvedRoute{providerID: m.ProviderID, keyID: k.ID, baseURL: p.BaseURL}, nil
-		}
-	}
-	return resolvedRoute{}, errors.New("no active key serves model " + model)
-}
+// (routing now lives in router.go: round-robin + cooldown + failover.)
 
 // modelsResponse is the OpenAI /v1/models shape.
 type modelsResponse struct {
