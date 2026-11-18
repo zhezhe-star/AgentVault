@@ -41,3 +41,9 @@
 - 目录：cmd/agentvault + internal/{provider,secret,crypto,proxy,usage,console}。
 - `go build ./...` ✅ `go vet ./...` ✅ `gofmt -l .` 空 ✅ `agentvault --help`/`version` 正常。
 - CI workflow（gofmt/vet/test）+ Makefile + .gitignore（bin/ *.db .bak tmp-screenshots）。
+
+## [2026-11-18T00:15:00+08:00] evidence: M1-2 Provider 实体与 SQLite schema 完成
+- modernc.org/sqlite（纯 Go，无 cgo，开源 CI 友好），WAL + busy_timeout=5000。
+- 表：providers / keys（status: active|disabled|revoked）/ models（UNIQUE(key_id,name)）+ schema_migrations 前向迁移，Open 可重复执行幂等。
+- 密钥隔离：keys 表只存 secret_id 引用，无明文列。
+- 测试：迁移幂等、provider/key/model 生命周期、状态流转、重复模型 UNIQUE 拒绝 —— `go test ./internal/provider/` ok，vet/gofmt 干净。

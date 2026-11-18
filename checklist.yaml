@@ -16,11 +16,11 @@ tasks:
   - id: M1-2
     milestone: M1
     title: Provider 实体模型与 SQLite schema（迁移机制，表 providers/keys）
-    status: pending
+    status: complete
     acceptance: >
       go test ./internal/provider 通过：建库迁移成功、provider 增删查、
       key 状态流转（active/disabled/revoked）正确；migration 版本表存在且可重复执行幂等
-    evidence: ""
+    evidence: "[2026-11-18T00:15:00+08:00] go test ./internal/provider ok；迁移幂等/状态流转/UNIQUE 测试全过，见 run-log M1-2"
 
   - id: M1-3
     milestone: M1
