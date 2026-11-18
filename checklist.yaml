@@ -89,11 +89,11 @@ tasks:
   - id: M2-4
     milestone: M2
     title: SSE streaming 透传
-    status: pending
+    status: in_progress
     acceptance: >
       mock 上游返回 stream=true 的 SSE，代理逐块透传且首字节延迟无明显缓冲；
       流中途上游断开时客户端收到错误帧而非挂死
-    evidence: ""
+    evidence: "[2026-11-18T03:45:00+08:00] SSE 透传/断连两用例全过，见 run-log M2-4"
 
   - id: M2-5
     milestone: M2

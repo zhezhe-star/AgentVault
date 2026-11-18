@@ -83,3 +83,7 @@
 - router：weight 降序 + keyID 稳定排序的候选列表、round-robin、429/5xx 失败即冷却 60s 并 failover、成功清零、coolingCount 观测。
 - **修复 rr 初值 bug**：map 零值 0 导致首轮跳过第一个候选（debug 测试定位：candidates 顺序正确而 pick 落在 b2），改为缺省视为 -1。
 - 测试：A 429 → 同请求切 B 成功且 A 冷却不再被选（后续 3 请求全走 B）、冷却到期恢复、全部 key 耗尽中继 429、错误体不泄漏。全仓 6 包 ok，vet/gofmt 干净。
+
+## [2026-11-18T03:45:00+08:00] evidence: M2-4 SSE streaming 透传完成
+- 测试：mock 上游逐块推送 SSE → 代理透传 3 个 data 块（含 [DONE]），Content-Type 保留 text/event-stream，首块无缓冲延迟（flushCopy 逐块 Flush）。
+- 流中断用例：上游 mid-stream 断连（http.ErrAbortHandler）→ 客户端收到流关闭而非挂死（5s 超时护栏）。全仓 6 包 ok，vet/gofmt 干净。
