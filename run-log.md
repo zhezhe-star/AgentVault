@@ -31,3 +31,13 @@
 - M4 末 = 最终验收：真机扫描明文落盘点清零。
 - 新增外部判据 3 条（真机迁移证据 / 真实流量证据 / 清零复核），置于「完成」度量判据首位。
 - checklist 21 → 24 任务（新增 M2-6、M2-7、M3-6）。
+
+## [2026-11-17T00:30:00+08:00] decision: 决策节点 1 通过 — 计划批准，进入执行循环
+- 用户明确批准三件套（24 任务，M1-M4）。plan.md 状态改 approved。
+- Go 工具链：go1.26.6 darwin/arm64。开始 M1-1（仓库脚手架）。
+
+## [2026-11-18T00:05:00+08:00] evidence: M1-1 仓库脚手架完成
+- go mod init github.com/zhezhe-star/AgentVault；cobra v1.10.2。
+- 目录：cmd/agentvault + internal/{provider,secret,crypto,proxy,usage,console}。
+- `go build ./...` ✅ `go vet ./...` ✅ `gofmt -l .` 空 ✅ `agentvault --help`/`version` 正常。
+- CI workflow（gofmt/vet/test）+ Makefile + .gitignore（bin/ *.db .bak tmp-screenshots）。

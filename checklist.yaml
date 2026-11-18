@@ -7,11 +7,11 @@ tasks:
   - id: M1-1
     milestone: M1
     title: 仓库脚手架（go module、目录结构、cobra CLI 骨架、CI workflow、Makefile）
-    status: pending
+    status: complete
     acceptance: >
       go build ./... 成功；agentvault --help 显示子命令骨架；.github/workflows/ci.yml
       存在且含 go test + go vet + gofmt 检查；make test 可运行
-    evidence: ""
+    evidence: "[2026-11-18T00:05:00+08:00] build/vet/gofmt 全绿，--help 正常，run-log M1-1 条目"
 
   - id: M1-2
     milestone: M1

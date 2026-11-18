@@ -1,6 +1,6 @@
 # plan.md — Issue #2：基于 local api key 的流量控制后台
 
-状态：**draft**（待决策节点 1 批准）
+状态：**approved**（2026-11-17 决策节点 1 获用户批准）
 
 ## 背景
 
