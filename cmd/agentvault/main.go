@@ -5,6 +5,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -13,6 +14,14 @@ import (
 var version = "dev"
 
 func main() {
+	if err := newRootCmd(os.Stdout).Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+// newRootCmd assembles the full command tree writing to out.
+func newRootCmd(out io.Writer) *cobra.Command {
 	root := &cobra.Command{
 		Use:   "agentvault",
 		Short: "Local encrypted API key vault with an OpenAI-compatible proxy",
@@ -20,19 +29,17 @@ func main() {
 local OpenAI-compatible proxy so plaintext keys never live in config files.`,
 		SilenceUsage: true,
 	}
-	root.AddCommand(versionCmd())
-	if err := root.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
+	root.SetOut(out)
+	root.AddCommand(versionCmd(out), keyCmd(), providerCmd())
+	return root
 }
 
-func versionCmd() *cobra.Command {
+func versionCmd(out io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
 		Short: "Print the agentvault version",
 		Run: func(*cobra.Command, []string) {
-			fmt.Println("agentvault", version)
+			fmt.Fprintln(out, "agentvault", version)
 		},
 	}
 }

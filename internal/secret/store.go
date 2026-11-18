@@ -69,10 +69,18 @@ type MemoryStore struct {
 	entries map[string]string
 }
 
+// defaultMemory is the process-wide store returned by SharedMemoryStore so
+// that every component selecting the memory backend within one process sees
+// the same entries (mirroring how a real keychain is process-global).
+var defaultMemory = NewMemoryStore()
+
 // NewMemoryStore returns an empty in-memory store.
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{entries: map[string]string{}}
 }
+
+// SharedMemoryStore returns the process-wide memory store.
+func SharedMemoryStore() *MemoryStore { return defaultMemory }
 
 func memKey(service, account string) string { return service + "/" + account }
 

@@ -43,11 +43,11 @@ tasks:
   - id: M1-5
     milestone: M1
     title: 控制面 CLI（provider add/list/show/revoke，key 录入经 stdin 不回显）
-    status: pending
+    status: in_progress
     acceptance: >
       用临时 HOME+内存 secret 后端跑 CLI 集成测试：add 后 list/show 可见元数据、
       revoke 后 key 状态为 revoked 且路由层不可见；终端输出与 --json 均不含明文 key
-    evidence: ""
+    evidence: "[2026-11-18T02:30:00+08:00] 沙箱演示 + CLI 集成测试全过，DB grep 无明文，见 run-log M1-5（--json 输出随 M2-6 前端 API 补充）"
 
   - id: M1-6
     milestone: M1

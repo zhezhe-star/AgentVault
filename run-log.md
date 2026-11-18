@@ -57,3 +57,8 @@
 ## [2026-11-18T00:35:00+08:00] evidence: M1-4 AES-GCM 信封加密层完成
 - Envelope：DEK（32B）首次使用时生成并存钥匙链（account=data-encryption-key），base64(nonce|ciphertext) AES-256-GCM。
 - 测试 5 项全过：加解密往返、篡改密文报 ErrBadCiphertext、错误 DEK 失败、同明文密文随机化（nonce 唯一）、跨 Envelope 复用同一 DEK。vet/gofmt 干净。
+
+## [2026-11-18T02:30:00+08:00] evidence: M1-5 控制面 CLI 完成
+- provider add/list/show/revoke + add-key（TTY 隐藏回显；管道场景限读 64KB）。
+- 沙箱演示（AGENTVAULT_HOME=mktemp + memory 后端）：add → add-key → list/show 显示 ref:bigmodel/primary → revoke 后 status=revoked；输出无明文。
+- `grep fake-glm-key agentvault.db` 无命中（exit 1）。CLI 集成测试断言 stdout/secret 隔离/撤销状态全过；全仓测试 + vet + gofmt 绿。
