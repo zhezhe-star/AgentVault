@@ -92,3 +92,8 @@
 - serve（--daemon setsid 后台 + pid 文件）、stop（SIGTERM 优雅退出）、status（pid 存活 + /admin/routing 冷却数 + provider/key/model 计数）。
 - 新增 /admin/routing 端点（loopback-only listener 保护）。
 - 真实沙箱演示：serve --daemon → status 显示 pid/冷却/计数 → curl /healthz ok → stop → status running=false。全仓 6 包测试 ok，vet/gofmt 干净。
+
+## [2026-11-18T04:15:00+08:00] evidence: M2-6 控制面前端 v0 完成
+- internal/console：embed 静态页 + /console/api/overview，三级视图 provider → key(ref) → 模型(token 列为真实 0，M3 接用量库)。
+- 挂载到代理同进程：/console/ 与 / 静态服务；仅 127.0.0.1（复用 listener 保护）。
+- 测试：overview 返回真实库数据、index 可访问、即使后端有 secret API 也不含密钥。全仓 7 包 ok，vet/gofmt 干净。

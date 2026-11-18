@@ -107,12 +107,12 @@ tasks:
   - id: M2-6
     milestone: M2
     title: 控制面前端 v0（内嵌静态页：provider → key → 模型三级视图，token 列暂为 0）
-    status: pending
+    status: in_progress
     acceptance: >
       浏览器访问 http://127.0.0.1:<port>/ 渲染三级视图；数据来自 SQLite 真实
       注册信息（禁止 mock 数据）；集成测试断言 API 返回与页面数据一致；
       仅绑定 127.0.0.1
-    evidence: ""
+    evidence: "[2026-11-18T04:15:00+08:00] console 3 测试全过（真实数据/页面/无泄漏），见 run-log M2-6"
 
   - id: M2-7
     milestone: M2

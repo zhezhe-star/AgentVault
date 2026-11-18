@@ -16,6 +16,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zhezhe-star/AgentVault/internal/app"
+	"github.com/zhezhe-star/AgentVault/internal/console"
 	"github.com/zhezhe-star/AgentVault/internal/provider"
 	"github.com/zhezhe-star/AgentVault/internal/secret"
 )
@@ -61,6 +63,8 @@ func New(store *provider.Store, sec secret.Store, service string) *Server {
 		_, _ = w.Write([]byte("ok"))
 	})
 	s.mux.HandleFunc("/admin/routing", s.handleRoutingStatus)
+	s.mux.Handle("/console", http.RedirectHandler("/console/", http.StatusMovedPermanently))
+	s.mux.Handle("/console/", console.Handler(store, app.KeyRef))
 	return s
 }
 
