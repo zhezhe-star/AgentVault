@@ -62,11 +62,11 @@ tasks:
   - id: M2-1
     milestone: M2
     title: OpenAI 兼容代理 HTTP 服务（仅绑 127.0.0.1，/v1/chat/completions、/v1/models）
-    status: pending
+    status: in_progress
     acceptance: >
       集成测试：httptest mock 上游下 curl /v1/chat/completions 返回 200 且响应体
       为 OpenAI chat 格式；绑定地址断言拒绝非回环接口；panic 有 recover 不 crash
-    evidence: ""
+    evidence: "[2026-11-18T03:00:00+08:00] proxy 5 测试全过（转发/loopback/panic/models/404无泄漏），见 run-log M2-1"
 
   - id: M2-2
     milestone: M2

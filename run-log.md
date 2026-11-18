@@ -67,3 +67,9 @@
 - leakscan 包：随机合成 key 注入完整管线（provider store + memory SecretStore + envelope），断言 SQLite 字节（含 -wal）、源码树、错误信息、输出均无明文。
 - 全仓 `go test ./...` 5 包 ok（cmd/provider/secret/crypto/leakscan），vet/gofmt 干净。
 - **M1 里程碑完成**：6/6 任务 complete。M1 验收口径（测试全绿 + CLI 演示）满足，证据见 02:30/02:45 条目。
+
+## [2026-11-18T03:00:00+08:00] evidence: M2-1 代理 HTTP 服务完成
+- Server：/v1/chat/completions（POST 转发 OpenAI 格式）、/v1/models（聚合 models 表）、/healthz。
+- 仅绑 127.0.0.1（非回环地址直接拒绝，有测试）；panic recover 中间件返回 500 JSON；响应逐块 flush（SSE 友好）。
+- 测试：转发正确（Authorization=Bearer 注入、路径 /chat/completions、body 透传、响应 OpenAI 格式）、loopback 拒绝、panic 500、models 列表、未知模型 404 且不泄漏 key。
+- go test ./... 6 包 ok；vet/gofmt 干净。
