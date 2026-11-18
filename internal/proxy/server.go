@@ -35,8 +35,10 @@ type Server struct {
 	store  *provider.Store
 	secret secret.Store
 	svc    string
+	keys   *keyCache
 	client *http.Client
 	mux    *http.ServeMux
+	logger Logger
 }
 
 // New builds a Server over the given stores.
@@ -45,8 +47,10 @@ func New(store *provider.Store, sec secret.Store, service string) *Server {
 		store:  store,
 		secret: sec,
 		svc:    service,
+		keys:   newKeyCache(sec, service),
 		client: &http.Client{Timeout: 10 * time.Minute},
 		mux:    http.NewServeMux(),
+		logger: func(_ RequestLog) {},
 	}
 	s.mux.HandleFunc("/v1/chat/completions", s.handleChat)
 	s.mux.HandleFunc("/v1/models", s.handleModels)
@@ -92,15 +96,53 @@ func isLoopbackHost(addr string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// RequestLog is what gets logged per request: metadata only. Headers,
+// bodies and keys are structurally excluded by construction — there is no
+// redaction to get wrong.
+type RequestLog struct {
+	Method string
+	Path   string
+	Status int
+	Model  string
+}
+
+// Logger receives per-request metadata.
+type Logger func(RequestLog)
+
+// SetLogger installs a request-metadata logger.
+func (s *Server) SetLogger(l Logger) { s.logger = l }
+
 func (s *Server) recoverMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		defer func() {
-			if rec := recover(); rec != nil {
-				http.Error(w, fmt.Sprintf(`{"error":{"message":"proxy panic: %v"}}`, rec), http.StatusInternalServerError)
+			if p := recover(); p != nil {
+				http.Error(rec, fmt.Sprintf(`{"error":{"message":"proxy panic: %v"}}`, p), http.StatusInternalServerError)
 			}
+			s.logger(RequestLog{Method: r.Method, Path: r.URL.Path, Status: rec.status})
+			_ = start
 		}()
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(rec, r)
 	})
+}
+
+// statusWriter captures the status code for logging.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+// Flush forwards to the underlying flusher so SSE keeps working.
+func (w *statusWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // chatRequest is the subset of the OpenAI chat request the proxy needs.
@@ -132,8 +174,12 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fetch the key in-process from the secret store.
-	key, err := s.secret.Get(s.svc, route.providerID+"/"+route.keyID)
+	// Fetch the key in-process (TTL-cached; never persisted or logged).
+	key, err := s.keys.get(route.providerID, route.keyID)
+	if isNotFound(err) {
+		writeError(w, http.StatusInternalServerError, "key missing from vault")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "fetch key from vault")
 		return

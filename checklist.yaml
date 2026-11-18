@@ -71,11 +71,11 @@ tasks:
   - id: M2-2
     milestone: M2
     title: 进程内 key 注入（从 SecretStore 解密取 key，请求后不留存内存副本超时清除）
-    status: pending
+    status: in_progress
     acceptance: >
       测试断言上游收到的 Authorization 为正确 key；代理日志与错误响应中不含 key；
       key 缓存有 TTL，过期后重新从 SecretStore 读取
-    evidence: ""
+    evidence: "[2026-11-18T03:10:00+08:00] keyCache TTL/invalidate 测试全过；日志结构排除 key，见 run-log M2-2"
 
   - id: M2-3
     milestone: M2

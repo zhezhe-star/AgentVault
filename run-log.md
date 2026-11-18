@@ -73,3 +73,8 @@
 - 仅绑 127.0.0.1（非回环地址直接拒绝，有测试）；panic recover 中间件返回 500 JSON；响应逐块 flush（SSE 友好）。
 - 测试：转发正确（Authorization=Bearer 注入、路径 /chat/completions、body 透传、响应 OpenAI 格式）、loopback 拒绝、panic 500、models 列表、未知模型 404 且不泄漏 key。
 - go test ./... 6 包 ok；vet/gofmt 干净。
+
+## [2026-11-18T03:10:00+08:00] evidence: M2-2 key 注入 TTL 缓存完成
+- keyCache：解密 key 进程内存缓存 TTL 5 分钟，invalidate 支持故障后立即刷新；miss 映射 ErrNotFound。
+- 日志结构化排除：RequestLog 只含 method/path/status/model，header/body/key 构造上不可进入日志（无脱敏逻辑可出错）。
+- 测试：TTL 内不读新值、invalidate 立即刷新、miss 分类、Flush 透传（SSE 不被日志层缓冲）。全仓 6 包 ok，vet/gofmt 干净。
