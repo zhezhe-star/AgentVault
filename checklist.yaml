@@ -52,11 +52,11 @@ tasks:
   - id: M1-6
     milestone: M1
     title: 密钥泄漏扫描测试（仓库/日志/DB/错误信息断言无明文 key）
-    status: pending
+    status: complete
     acceptance: >
       go test 运行泄漏扫描：向系统注入测试 key 后 grep 检查源码树、测试日志输出、
       sqlite 文件字节、CLI 输出均无该 key；M1 全量测试绿
-    evidence: ""
+    evidence: "[2026-11-18T02:45:00+08:00] leakscan 全过，全仓 5 包 ok，见 run-log M1-6；M1 里程碑达成"
 
   # ── M2: 本地代理与多 key 路由 ────────────────────────────
   - id: M2-1

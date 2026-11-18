@@ -62,3 +62,8 @@
 - provider add/list/show/revoke + add-key（TTY 隐藏回显；管道场景限读 64KB）。
 - 沙箱演示（AGENTVAULT_HOME=mktemp + memory 后端）：add → add-key → list/show 显示 ref:bigmodel/primary → revoke 后 status=revoked；输出无明文。
 - `grep fake-glm-key agentvault.db` 无命中（exit 1）。CLI 集成测试断言 stdout/secret 隔离/撤销状态全过；全仓测试 + vet + gofmt 绿。
+
+## [2026-11-18T02:45:00+08:00] evidence: M1-6 密钥泄漏扫描测试完成 — M1 里程碑达成
+- leakscan 包：随机合成 key 注入完整管线（provider store + memory SecretStore + envelope），断言 SQLite 字节（含 -wal）、源码树、错误信息、输出均无明文。
+- 全仓 `go test ./...` 5 包 ok（cmd/provider/secret/crypto/leakscan），vet/gofmt 干净。
+- **M1 里程碑完成**：6/6 任务 complete。M1 验收口径（测试全绿 + CLI 演示）满足，证据见 02:30/02:45 条目。
