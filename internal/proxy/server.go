@@ -60,6 +60,7 @@ func New(store *provider.Store, sec secret.Store, service string) *Server {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	s.mux.HandleFunc("/admin/routing", s.handleRoutingStatus)
 	return s
 }
 
@@ -295,6 +296,35 @@ func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
 		}
 		seen[m.Name] = true
 		out.Data = append(out.Data, modelEntry{ID: m.Name, Object: "model", Owned: m.ProviderID})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+// handleRoutingStatus reports cooldown observation for the status CLI and
+// the console (loopback-only by construction of the listener).
+func (s *Server) handleRoutingStatus(w http.ResponseWriter, _ *http.Request) {
+	providers, _ := s.store.ListProviders()
+	type providerStatus struct {
+		ID     string `json:"id"`
+		Name   string `json:"name"`
+		Keys   int    `json:"keys_active"`
+		Models int    `json:"models"`
+	}
+	out := struct {
+		CoolingKeys int              `json:"cooling_keys"`
+		Providers   []providerStatus `json:"providers"`
+	}{CoolingKeys: s.router.coolingCount()}
+	for _, p := range providers {
+		keys, _ := s.store.ListKeys(p.ID)
+		active := 0
+		for _, k := range keys {
+			if k.Status == provider.KeyActive {
+				active++
+			}
+		}
+		models, _ := s.store.ListModels(p.ID)
+		out.Providers = append(out.Providers, providerStatus{ID: p.ID, Name: p.Name, Keys: active, Models: len(models)})
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)

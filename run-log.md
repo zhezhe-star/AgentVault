@@ -87,3 +87,8 @@
 ## [2026-11-18T03:45:00+08:00] evidence: M2-4 SSE streaming 透传完成
 - 测试：mock 上游逐块推送 SSE → 代理透传 3 个 data 块（含 [DONE]），Content-Type 保留 text/event-stream，首块无缓冲延迟（flushCopy 逐块 Flush）。
 - 流中断用例：上游 mid-stream 断连（http.ErrAbortHandler）→ 客户端收到流关闭而非挂死（5s 超时护栏）。全仓 6 包 ok，vet/gofmt 干净。
+
+## [2026-11-18T04:00:00+08:00] evidence: M2-5 代理生命周期 CLI 完成
+- serve（--daemon setsid 后台 + pid 文件）、stop（SIGTERM 优雅退出）、status（pid 存活 + /admin/routing 冷却数 + provider/key/model 计数）。
+- 新增 /admin/routing 端点（loopback-only listener 保护）。
+- 真实沙箱演示：serve --daemon → status 显示 pid/冷却/计数 → curl /healthz ok → stop → status running=false。全仓 6 包测试 ok，vet/gofmt 干净。

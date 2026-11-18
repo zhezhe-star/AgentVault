@@ -98,11 +98,11 @@ tasks:
   - id: M2-5
     milestone: M2
     title: 代理生命周期 CLI（serve/stop/status + 冷却状态观测）
-    status: pending
+    status: in_progress
     acceptance: >
       agentvault serve 后台启动并写 pid 文件；status 报告端口/各 key 健康与冷却状态；
       stop 优雅退出；M2 全量测试绿 + 手动 curl 冒烟记录进 run-log
-    evidence: ""
+    evidence: "[2026-11-18T04:00:00+08:00] serve/status/stop 沙箱演示全过（pid 56954 生命周期），见 run-log M2-5"
 
   - id: M2-6
     milestone: M2
