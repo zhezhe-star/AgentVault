@@ -53,3 +53,7 @@
 - 服务名命名空间 "agentvault"，按 service/account 隔离；go-keyring.ErrNotFound 映射为包内 ErrNotFound。
 - 测试：往返、账号/服务隔离、删除后 NotFound —— go test ./internal/secret ok；vet/gofmt 干净。
 - MemoryStore 文档明确标注不得用于生产。
+
+## [2026-11-18T00:35:00+08:00] evidence: M1-4 AES-GCM 信封加密层完成
+- Envelope：DEK（32B）首次使用时生成并存钥匙链（account=data-encryption-key），base64(nonce|ciphertext) AES-256-GCM。
+- 测试 5 项全过：加解密往返、篡改密文报 ErrBadCiphertext、错误 DEK 失败、同明文密文随机化（nonce 唯一）、跨 Envelope 复用同一 DEK。vet/gofmt 干净。

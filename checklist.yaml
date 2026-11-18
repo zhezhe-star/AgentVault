@@ -34,11 +34,11 @@ tasks:
   - id: M1-4
     milestone: M1
     title: AES-GCM 数据加密层（DEK 存钥匙链，信封加密）
-    status: pending
+    status: complete
     acceptance: >
       go test ./internal/crypto 通过：加解密往返、篡改密文报错、DEK 从 SecretStore
       获取；随机性测试（同明文两次加密密文不同）
-    evidence: ""
+    evidence: "[2026-11-18T00:35:00+08:00] crypto 5 测试全过（往返/篡改/错DEK/随机化/DEK复用），见 run-log M1-4"
 
   - id: M1-5
     milestone: M1
