@@ -137,3 +137,9 @@
 - 代理语义：请求前查滚动窗口实际用量（读 usage_records，跨重启有效），已达上限即 429（调用前无法预知本次 token，语义为「超限后的下一请求被拒」）；429 错误体含 agentvault_quota_exceeded/scope/ref_id；配额 429 也记 usage（可观测）。
 - 测试：per-key 耗尽（2 过 3 拒，历史总和恰等于上限）、per-provider 独立生效、窗口滚动恢复（1s 窗实测）、错误体结构与无泄漏。-count=3 稳定。全仓 9 包 ok。
 - 部署注意：live 代理启用配额检查但未对 bigmodel 设真实配额（空配置=不限制），避免打断用户当前会话；M3-6 验收需 429 时再临时设小配额。
+
+## [2026-11-20T21:30:00+08:00] evidence: M3-4 熔断与恢复探测完成
+- router 熔断：连续失败计数达 BreakerThreshold=3 → 熔断（冷却升级为 BreakerOpenDuration=5min，breaker 标记）；冷却到期后首次被选即半开探测——成功清零闭合，失败（计数仍≥阈值）立即重开。
+- 观测：/admin/routing 增 breaker_keys，status CLI 输出 breaker keys 行。
+- 测试：TripAndHalfOpenRecovers 全链路（触发→探测前拒绝→探测放行→失败重开→成功闭合→正常服务）-count=3 稳定。全仓 9 包 ok。
+- 遗留说明：全 key 耗尽仍中继最后上游状态（429）——保留原语义（客户端可重试），未改 503；已在 M2-3 记录。

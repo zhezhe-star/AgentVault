@@ -154,10 +154,10 @@ tasks:
   - id: M3-4
     milestone: M3
     title: 熔断与冷却观测（错误率熔断、CLI 可查、恢复探测）
-    status: pending
+    status: complete
     acceptance: >
       连续错误达阈值触发熔断且半开探测恢复的测试通过；status 输出含熔断/冷却态
-    evidence: ""
+    evidence: "[2026-11-20T21:30:00+08:00] 熔断全链路测试过（触发/半开恢复/重开/闭合），status 含 breaker keys，见 run-log M3-4"
 
   # ── M4: 明文迁移与接入替换（按消费方式三分类）──────────────
   - id: M4-1

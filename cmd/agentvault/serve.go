@@ -200,6 +200,7 @@ func statusCmd() *cobra.Command {
 			defer resp.Body.Close()
 			var out struct {
 				CoolingKeys int `json:"cooling_keys"`
+				BreakerKeys int `json:"breaker_keys"`
 				Providers   []struct {
 					ID     string `json:"id"`
 					Name   string `json:"name"`
@@ -210,7 +211,7 @@ func statusCmd() *cobra.Command {
 			if err := decodeJSON(resp.Body, &out); err != nil {
 				return fmt.Errorf("decode routing status: %w", err)
 			}
-			fmt.Printf("cooling keys: %d\n", out.CoolingKeys)
+			fmt.Printf("cooling keys: %d\nbreaker keys: %d\n", out.CoolingKeys, out.BreakerKeys)
 			for _, p := range out.Providers {
 				fmt.Printf("provider %s (%s): %d active keys, %d models\n", p.ID, p.Name, p.Keys, p.Models)
 			}

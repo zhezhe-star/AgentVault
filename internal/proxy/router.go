@@ -12,6 +12,15 @@ import (
 // the rotation.
 const DefaultCooldown = 60 * time.Second
 
+// BreakerThreshold is the number of consecutive failures that trips the
+// circuit breaker for a key.
+const BreakerThreshold = 3
+
+// BreakerOpenDuration is how long an open breaker keeps the key out. The
+// first pick after expiry acts as the half-open probe: success closes the
+// breaker, failure re-opens it.
+const BreakerOpenDuration = 5 * time.Minute
+
 // candidate is one routable upstream choice.
 type candidate struct {
 	providerID       string
@@ -24,21 +33,31 @@ type candidate struct {
 // router picks upstreams among the active keys serving a model, rotating
 // round-robin and cooling down keys that fail.
 type router struct {
-	mu       sync.Mutex
-	store    *provider.Store
-	cooldown time.Duration
+	mu          sync.Mutex
+	store       *provider.Store
+	cooldown    time.Duration
+	breakerOpen time.Duration // test hook; defaults to BreakerOpenDuration
 	// cooldowns tracks keys currently sitting out, keyed by provider/key.
 	cooldowns map[string]time.Time
+	// fails counts consecutive failures per key; reaching
+	// BreakerThreshold opens the breaker (a longer cooldown).
+	fails map[string]int
+	// breaker marks keys whose current cooldown is breaker-open rather
+	// than a plain cooldown (for status observation).
+	breaker map[string]bool
 	// rr remembers the last-used index per model for round-robin.
 	rr map[string]int
 }
 
 func newRouter(store *provider.Store, cooldown time.Duration) *router {
 	return &router{
-		store:     store,
-		cooldown:  cooldown,
-		cooldowns: map[string]time.Time{},
-		rr:        map[string]int{},
+		store:       store,
+		cooldown:    cooldown,
+		breakerOpen: BreakerOpenDuration,
+		cooldowns:   map[string]time.Time{},
+		fails:       map[string]int{},
+		breaker:     map[string]bool{},
+		rr:          map[string]int{},
 	}
 }
 
@@ -115,18 +134,38 @@ func (r *router) pick(model string) (candidate, bool) {
 	return healthy[idx], true
 }
 
-// fail puts a key into cooldown (429 or upstream 5xx).
+// fail puts a key into cooldown (429 or upstream 5xx). Consecutive
+// failures at BreakerThreshold trip the breaker: the key sits out for
+// BreakerOpenDuration instead, and its next pick is the half-open probe.
 func (r *router) fail(c candidate) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.cooldowns[c.providerID+"/"+c.keyID] = time.Now().Add(r.cooldown)
+	id := c.providerID + "/" + c.keyID
+	r.fails[id]++
+	if r.fails[id] >= BreakerThreshold {
+		r.cooldowns[id] = time.Now().Add(r.breakerOpen)
+		r.breaker[id] = true
+		return
+	}
+	r.cooldowns[id] = time.Now().Add(r.cooldown)
 }
 
-// success clears any failure state for the key.
+// success clears any failure state for the key (a successful half-open
+// probe closes the breaker).
 func (r *router) success(c candidate) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.cooldowns, c.providerID+"/"+c.keyID)
+	id := c.providerID + "/" + c.keyID
+	delete(r.cooldowns, id)
+	delete(r.fails, id)
+	delete(r.breaker, id)
+}
+
+// breakerCount reports how many keys currently have an open breaker.
+func (r *router) breakerCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.breaker)
 }
 
 // coolingCount reports how many keys are currently cooling down (for

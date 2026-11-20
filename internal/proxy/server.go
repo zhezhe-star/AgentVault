@@ -427,8 +427,9 @@ func (s *Server) handleRoutingStatus(w http.ResponseWriter, _ *http.Request) {
 	}
 	out := struct {
 		CoolingKeys int              `json:"cooling_keys"`
+		BreakerKeys int              `json:"breaker_keys"`
 		Providers   []providerStatus `json:"providers"`
-	}{CoolingKeys: s.router.coolingCount()}
+	}{CoolingKeys: s.router.coolingCount(), BreakerKeys: s.router.breakerCount()}
 	for _, p := range providers {
 		keys, _ := s.store.ListKeys(p.ID)
 		active := 0

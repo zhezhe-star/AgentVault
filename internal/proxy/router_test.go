@@ -142,7 +142,8 @@ func TestCooldownExpiryRecoversKey(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	defer store.Close()
-	r := newRouter(store, 10*time.Millisecond) // short cooldown for the test
+	r := newRouter(store, 10*time.Millisecond)
+	r.breakerOpen = 15 * time.Millisecond // fast breaker for the test // short cooldown for the test
 	// Register one active key serving the model so pick has a candidate.
 	_ = store.CreateProvider(provider.Provider{ID: "p", Name: "P", BaseURL: "http://x"})
 	_ = store.CreateKey(provider.Key{ID: "k", ProviderID: "p", SecretID: "ref", Status: provider.KeyActive, Weight: 1})
@@ -162,5 +163,57 @@ func TestCooldownExpiryRecoversKey(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	if _, ok := r.pick("model"); !ok {
 		t.Fatal("key did not recover after cooldown expiry")
+	}
+}
+
+// M3-4: consecutive failures trip the breaker; the first pick after the
+// open duration is the half-open probe — success closes, failure re-opens.
+func TestBreakerTripsAndHalfOpenRecovers(t *testing.T) {
+	store, err := provider.Open(t.TempDir() + "/test.db")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+	_ = store.CreateProvider(provider.Provider{ID: "p", Name: "P", BaseURL: "http://127.0.0.1:1"})
+	_ = store.CreateKey(provider.Key{ID: "a", ProviderID: "p", SecretID: "ref", Status: provider.KeyActive})
+	_ = store.CreateModel(provider.Model{ID: "m", ProviderID: "p", KeyID: "a", Name: "m", Upstream: "m"})
+
+	r := newRouter(store, 10*time.Millisecond)
+	r.breakerOpen = 15 * time.Millisecond // fast breaker for the test
+
+	// Trip: 3 consecutive failures on the only key.
+	c := candidate{providerID: "p", keyID: "a"}
+	for i := 0; i < BreakerThreshold; i++ {
+		r.fail(c)
+	}
+	if r.breakerCount() != 1 {
+		t.Fatalf("breaker count = %d, want 1 after %d failures", r.breakerCount(), BreakerThreshold)
+	}
+	if _, ok := r.pick("m"); ok {
+		t.Fatal("open breaker still served traffic")
+	}
+
+	// Half-open probe after expiry.
+	time.Sleep(15 * time.Millisecond)
+	if _, ok := r.pick("m"); !ok {
+		t.Fatal("expired breaker should allow a probe")
+	}
+	// Probe failure re-opens (fails stayed at threshold).
+	r.fail(c)
+	if r.breakerCount() != 1 {
+		t.Fatalf("probe failure should re-open breaker, count=%d", r.breakerCount())
+	}
+
+	// Successful probe closes it.
+	time.Sleep(15 * time.Millisecond)
+	if _, ok := r.pick("m"); !ok {
+		t.Fatal("expired breaker should allow probe #2")
+	}
+	r.success(c)
+	if r.breakerCount() != 0 {
+		t.Fatalf("successful probe should close breaker, count=%d", r.breakerCount())
+	}
+	if _, ok := r.pick("m"); !ok {
+		t.Fatal("closed breaker should serve normally")
 	}
 }
