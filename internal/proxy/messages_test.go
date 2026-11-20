@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zhezhe-star/AgentVault/internal/provider"
 	"github.com/zhezhe-star/AgentVault/internal/secret"
@@ -192,6 +193,11 @@ func TestUsageRecordedPerCall(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	// The sink runs after the response is fully flushed, so poll briefly.
+	deadline := time.Now().Add(2 * time.Second)
+	for len(records) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
 	}
 	if len(records) != 1 {
 		t.Fatalf("usage records = %d, want 1", len(records))

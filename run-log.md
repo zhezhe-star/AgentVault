@@ -125,3 +125,9 @@
 - serve 接线：SetUsageSink → usage.Insert，记录失败不影响请求。
 - 测试：落库往返、50 并发无锁死计数正确、OpenAI/Anthropic 各 JSON+SSE 四种形态、垃圾输入零值；proxy 集成测试一次调用恰一条记录且字段完整。全仓 9 包 ok。
 - 真机验证：重启代理后真实 /v1/messages 调用落库 bigmodel|primary|glm-5.3-flash|anthropic|200|17|32|1197。
+
+## [2026-11-20T20:55:00+08:00] evidence: M3-2 usage 查询 CLI 完成
+- agentvault usage：--provider/--key/--model/--since/--until/--limit/--json；since/until 接受 RFC3339 或相对时长（1h/30m）。
+- 修复两处：时间窗比较统一 UTC（created_at 为字符串比较，本地 +08:00 会排错序）；Record 加 snake_case json tags。
+- 修复 proxy 集成测试竞态（sink 在响应 flush 后执行，改轮询等待，-count=5 稳定）。
+- 测试：过滤/JSON/时间窗用例全过；真机 `usage --limit 5` 显示用户当前真实会话经代理的流量记录（bigmodel glm-5.3-flash 多条 200，tokens 实值）。全仓 9 包 ok。

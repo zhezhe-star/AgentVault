@@ -137,10 +137,10 @@ tasks:
   - id: M3-2
     milestone: M3
     title: 用量查询 CLI（agentvault usage，按 provider/key/时间窗过滤，--json）
-    status: pending
+    status: complete
     acceptance: >
       集成测试：插入 N 条记录后查询输出与 SQL 直查一致；过滤条件正确；输出无敏感字段
-    evidence: ""
+    evidence: "[2026-11-20T20:55:00+08:00] usage CLI 测试全过（过滤/JSON/时间窗），真机查询显示真实会话流量，见 run-log M3-2"
 
   - id: M3-3
     milestone: M3

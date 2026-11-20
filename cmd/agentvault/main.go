@@ -32,6 +32,7 @@ local OpenAI-compatible proxy so plaintext keys never live in config files.`,
 	root.SetOut(out)
 	root.AddCommand(versionCmd(out), keyCmd(), providerCmd())
 	registerServeCommands(root)
+	registerUsageCommands(root)
 	return root
 }
 

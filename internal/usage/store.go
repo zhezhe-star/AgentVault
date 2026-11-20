@@ -7,6 +7,7 @@ package usage
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,15 +16,15 @@ import (
 
 // Record is one proxied call.
 type Record struct {
-	ProviderID string
-	KeyID      string
-	Model      string
-	Protocol   string // "openai" | "anthropic"
-	Status     int    // final status relayed to the client
-	TokensIn   int64
-	TokensOut  int64
-	LatencyMS  int64
-	CreatedAt  time.Time
+	ProviderID string    `json:"provider_id"`
+	KeyID      string    `json:"key_id"`
+	Model      string    `json:"model"`
+	Protocol   string    `json:"protocol"` // "openai" | "anthropic"
+	Status     int       `json:"status"`   // final status relayed to the client
+	TokensIn   int64     `json:"tokens_in"`
+	TokensOut  int64     `json:"tokens_out"`
+	LatencyMS  int64     `json:"latency_ms"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // Store wraps the SQLite database for usage writes/reads.
@@ -95,11 +96,45 @@ func (s *Store) Insert(r Record) error {
 
 // Query returns records ordered newest-first, capped at limit (0 = 100).
 func (s *Store) Query(limit int) ([]Record, error) {
-	if limit <= 0 {
-		limit = 100
+	return s.QueryFilter(Filter{Limit: limit})
+}
+
+// Filter narrows a usage query. Zero values are ignored.
+type Filter struct {
+	ProviderID string
+	KeyID      string
+	Model      string
+	Since      time.Time // inclusive
+	Until      time.Time // inclusive
+	Limit      int
+}
+
+// QueryFilter returns filtered records, newest first.
+func (s *Store) QueryFilter(f Filter) ([]Record, error) {
+	if f.Limit <= 0 {
+		f.Limit = 100
 	}
+	where, args := []string{"1=1"}, []any{}
+	if f.ProviderID != "" {
+		where, args = append(where, "provider_id = ?"), append(args, f.ProviderID)
+	}
+	if f.KeyID != "" {
+		where, args = append(where, "key_id = ?"), append(args, f.KeyID)
+	}
+	if f.Model != "" {
+		where, args = append(where, "model = ?"), append(args, f.Model)
+	}
+	if !f.Since.IsZero() {
+		// UTC: stored timestamps are UTC, and created_at comparison is a
+		// string comparison — a local +08:00 offset would sort wrong.
+		where, args = append(where, "created_at >= ?"), append(args, f.Since.UTC().Format(time.RFC3339Nano))
+	}
+	if !f.Until.IsZero() {
+		where, args = append(where, "created_at <= ?"), append(args, f.Until.UTC().Format(time.RFC3339Nano))
+	}
+	args = append(args, f.Limit)
 	rows, err := s.db.Query(`SELECT created_at, provider_id, key_id, model, protocol, status, tokens_in, tokens_out, latency_ms
-		FROM usage_records ORDER BY id DESC LIMIT ?`, limit)
+		FROM usage_records WHERE `+strings.Join(where, " AND ")+` ORDER BY id DESC LIMIT ?`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("usage: query: %w", err)
 	}
