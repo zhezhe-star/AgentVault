@@ -149,3 +149,10 @@
 - 三方一致性核对：console / `agentvault usage` / 直接 SQL 三处 token 数字一致（当时 glm-5.3-flash 128073/56227）。
 - 真实流量 429 验收：provider bigmodel 设 quota 3000 tokens/1m → 下一请求即 429，错误体 `{"error":{"message":"quota exceeded","ref_id":"bigmodel","scope":"provider","type":"agentvault_quota_exceeded"}}`；429 行落 usage_records（含用户 live 会话两条，客户端重试成功）；DELETE 配额后恢复 200。
 - 截图 docs/tasks/m3-6-console-tokens.png（真实累计：glm-5.3-flash 144494/65129、glm-4.5-air 351/14577）。全仓 9 包 ok，vet/gofmt 干净。
+
+## [2026-11-20T22:20:00+08:00] evidence: M3-5 文档收尾完成 — M3 里程碑达成
+- README 增快速上手四步：安装（go build）/ 录入（add + 管道 add-key 不回显）/ serve --daemon / 客户端接入（OpenAI env 与 Claude Code settings.json 两形态，占位符凭据）+ usage/quota 用法 + 路由容错与安全模型说明。
+- docs/design/survey.md：new-api / one-api / bricks-llm / LiteLLM 各自可借鉴点与不引入理由（透明透传无需协议转换层；Go 栈不引 Python 运行时；三者均要求上游 key 明文存其 DB，与本项目安全前提冲突）；末尾列明自实现边界与仅有的三个外部依赖（cobra/go-keyring/modernc sqlite）。
+- docs/design/architecture.md：单二进制架构图、密钥安全模型（明文仅存钥匙链+进程内存，leakscan 固化为回归测试）、wire 抽象转发循环、路由容错/配额/数据层/控制台设计、M4 三分类迁移规划。
+- 全量套件 -count=1 重跑绿（9 包 ok），vet/gofmt 干净。
+- **M3 里程碑完成**：M3-1…M3-4、M3-6 全部 complete（M3-5 本条收尾）。M3 验收口径满足：真实流量 token 统计三方一致（M3-6 证据）+ 真实流量 429 可观测（M3-6 证据）+ 文档齐备（本条）。

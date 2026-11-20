@@ -226,8 +226,11 @@ tasks:
   - id: M3-5
     milestone: M3
     title: 文档收尾（README 使用指南、docs/design/survey.md 借鉴项目调研、docs/design/architecture.md）
-    status: pending
+    status: complete
     acceptance: >
       README 含安装/录入 key/启动代理/接入客户端四步示例；survey.md 给出
       new-api/one-api/bricks-llm/LiteLLM 的可借鉴点与本项目取舍；全量套件重跑绿
-    evidence: ""
+    evidence: >
+      run-log 2026-11-20T22:20 条目：README 四步示例含 OpenAI/Anthropic 两接入
+      形态；survey.md 四项目取舍与自实现边界；architecture.md 架构图+安全模型；
+      go test -count=1 ./... 9 包全绿
