@@ -145,11 +145,11 @@ tasks:
   - id: M3-3
     milestone: M3
     title: 配额控制（per-provider / per-key 令牌窗口，超限 429）
-    status: pending
+    status: complete
     acceptance: >
       设 quota 后窗口内超限请求返回 429 与 quota 错误体；窗口滚动后恢复；
       per-key 与 per-provider 两级独立生效
-    evidence: ""
+    evidence: "[2026-11-20T21:15:00+08:00] quota 4 测试全过（耗尽/独立/滚动恢复/错误体），见 run-log M3-3"
 
   - id: M3-4
     milestone: M3

@@ -46,10 +46,17 @@ type Server struct {
 	// usageSink receives one record per forwarded request; nil disables
 	// recording (tests that don't care).
 	usageSink func(usage.Record)
+	quotas    *quotaChecker
 }
 
 // SetUsageSink installs the per-call usage recorder.
 func (s *Server) SetUsageSink(fn func(usage.Record)) { s.usageSink = fn }
+
+// EnableQuotas turns on rolling-window token enforcement backed by the
+// given stores (provider store for quota config, usage store for counts).
+func (s *Server) EnableQuotas(providers *provider.Store, usageStore *usage.Store) {
+	s.quotas = &quotaChecker{providers: providers, usage: usageStore}
+}
 
 // recordUsage is a no-op-safe wrapper around the sink.
 func (s *Server) recordUsage(r usage.Record) {
@@ -258,6 +265,19 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, wireFlavor wire
 			return
 		}
 
+		// Rolling-window quota check: over-limit requests are rejected
+		// with 429 before touching the upstream (and recorded so the
+		// throttling is observable).
+		if qt := s.quotas.overLimit(route); qt != nil {
+			writeQuotaError(w, qt)
+			s.recordUsage(usage.Record{
+				ProviderID: route.providerID, KeyID: route.keyID, Model: req.Model,
+				Protocol: protocol, Status: http.StatusTooManyRequests,
+				LatencyMS: time.Since(start).Milliseconds(),
+			})
+			return
+		}
+
 		// Fetch the key in-process (TTL-cached; never persisted or logged).
 		key, err := s.keys.get(route.providerID, route.keyID)
 		if isNotFound(err) {
@@ -429,5 +449,19 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"error": map[string]string{"message": msg, "type": "agentvault_error"},
+	})
+}
+
+// writeQuotaError emits a structured 429 naming the quota that tripped.
+func writeQuotaError(w http.ResponseWriter, qt *provider.Quota) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusTooManyRequests)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error": map[string]string{
+			"message": "quota exceeded",
+			"type":    "agentvault_quota_exceeded",
+			"scope":   qt.Scope,
+			"ref_id":  qt.RefID,
+		},
 	})
 }

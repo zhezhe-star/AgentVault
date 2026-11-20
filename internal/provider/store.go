@@ -89,6 +89,15 @@ var migrations = []string{
 	// Migration 4: optional Anthropic-compatible endpoint per provider for
 	// the /v1/messages passthrough. Empty string = OpenAI-only provider.
 	`ALTER TABLE providers ADD COLUMN anthropic_base_url TEXT NOT NULL DEFAULT ''`,
+	// Migration 5: token quotas. scope is "provider" or "key", ref_id the
+	// provider id / key id; max_tokens counted over a rolling window.
+	`CREATE TABLE quotas (
+		scope          TEXT NOT NULL,
+		ref_id         TEXT NOT NULL,
+		window_seconds INTEGER NOT NULL,
+		max_tokens     INTEGER NOT NULL,
+		PRIMARY KEY (scope, ref_id)
+	)`,
 }
 
 // Store wraps the SQLite database.
@@ -294,6 +303,43 @@ func (s *Store) ListModels(providerID string) ([]Model, error) {
 			return nil, fmt.Errorf("provider: scan model: %w", err)
 		}
 		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// Quota is a rolling-window token budget for a provider or a key.
+type Quota struct {
+	Scope         string // "provider" | "key"
+	RefID         string
+	WindowSeconds int
+	MaxTokens     int64
+}
+
+// SetQuota upserts a quota entry.
+func (s *Store) SetQuota(q Quota) error {
+	_, err := s.db.Exec(`INSERT INTO quotas (scope, ref_id, window_seconds, max_tokens) VALUES (?,?,?,?)
+		ON CONFLICT(scope, ref_id) DO UPDATE SET window_seconds=excluded.window_seconds, max_tokens=excluded.max_tokens`,
+		q.Scope, q.RefID, q.WindowSeconds, q.MaxTokens)
+	if err != nil {
+		return fmt.Errorf("provider: set quota: %w", err)
+	}
+	return nil
+}
+
+// ListQuotas returns every configured quota.
+func (s *Store) ListQuotas() ([]Quota, error) {
+	rows, err := s.db.Query(`SELECT scope, ref_id, window_seconds, max_tokens FROM quotas`)
+	if err != nil {
+		return nil, fmt.Errorf("provider: list quotas: %w", err)
+	}
+	defer rows.Close()
+	var out []Quota
+	for rows.Next() {
+		var q Quota
+		if err := rows.Scan(&q.Scope, &q.RefID, &q.WindowSeconds, &q.MaxTokens); err != nil {
+			return nil, fmt.Errorf("provider: scan quota: %w", err)
+		}
+		out = append(out, q)
 	}
 	return out, rows.Err()
 }

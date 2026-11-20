@@ -163,3 +163,21 @@ func (s *Store) SumTokens(model string) (in, out int64, err error) {
 	}
 	return in, out, nil
 }
+
+// SumTokensSince returns (tokens_in, tokens_out) since the given instant.
+// providerID / keyID narrow the sum; empty strings mean "all".
+func (s *Store) SumTokensSince(providerID, keyID string, since time.Time) (in, out int64, err error) {
+	where, args := []string{"created_at >= ?"}, []any{since.UTC().Format(time.RFC3339Nano)}
+	if providerID != "" {
+		where, args = append(where, "provider_id = ?"), append(args, providerID)
+	}
+	if keyID != "" {
+		where, args = append(where, "key_id = ?"), append(args, keyID)
+	}
+	err = s.db.QueryRow(`SELECT COALESCE(SUM(tokens_in),0), COALESCE(SUM(tokens_out),0)
+		FROM usage_records WHERE `+strings.Join(where, " AND "), args...).Scan(&in, &out)
+	if err != nil {
+		return 0, 0, fmt.Errorf("usage: sum tokens since: %w", err)
+	}
+	return in, out, nil
+}

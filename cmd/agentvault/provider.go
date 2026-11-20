@@ -24,7 +24,7 @@ func providerCmd() *cobra.Command {
 		Use:   "provider",
 		Short: "Manage model providers and their keys",
 	}
-	cmd.AddCommand(providerAddCmd(), providerListCmd(), providerShowCmd(), providerRevokeCmd(), providerAddModelCmd())
+	cmd.AddCommand(providerAddCmd(), providerListCmd(), providerShowCmd(), providerRevokeCmd(), providerAddModelCmd(), providerQuotaCmd())
 	return cmd
 }
 
@@ -265,5 +265,46 @@ func providerAddModelCmd() *cobra.Command {
 	cmd.Flags().StringVar(&keyID, "key-id", "", "provider key slot this model routes through")
 	cmd.Flags().StringVar(&upstream, "upstream", "", "model id at the provider (default: the requested model name)")
 	_ = cmd.MarkFlagRequired("key-id")
+	return cmd
+}
+
+func providerQuotaCmd() *cobra.Command {
+	var window, scope string
+	var maxTokens int64
+	cmd := &cobra.Command{
+		Use:   "quota <ref-id>",
+		Short: "Set a rolling-window token quota (window like 1h/30m; scope provider|key)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if maxTokens <= 0 || window == "" || (scope != "provider" && scope != "key") {
+				return fmt.Errorf("%w: --max-tokens (>0), --window and --scope=provider|key are required", app.ErrFlagMissing)
+			}
+			d, err := time.ParseDuration(window)
+			if err != nil || d <= 0 {
+				return fmt.Errorf("--window must be a positive duration: %w", err)
+			}
+			cfg, err := app.Resolve()
+			if err != nil {
+				return err
+			}
+			store, err := cfg.OpenStore()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			if err := store.SetQuota(provider.Quota{
+				Scope: scope, RefID: args[0],
+				WindowSeconds: int(d.Seconds()), MaxTokens: maxTokens,
+			}); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "quota set: %s %s max %d tokens / %s\n", scope, args[0], maxTokens, window)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&scope, "scope", "provider", "quota scope: provider or key")
+	cmd.Flags().StringVar(&window, "window", "1h", "rolling window duration (e.g. 1h, 30m)")
+	cmd.Flags().Int64Var(&maxTokens, "max-tokens", 0, "max tokens (in+out) within the window")
+	_ = cmd.MarkFlagRequired("max-tokens")
 	return cmd
 }

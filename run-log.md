@@ -131,3 +131,9 @@
 - 修复两处：时间窗比较统一 UTC（created_at 为字符串比较，本地 +08:00 会排错序）；Record 加 snake_case json tags。
 - 修复 proxy 集成测试竞态（sink 在响应 flush 后执行，改轮询等待，-count=5 稳定）。
 - 测试：过滤/JSON/时间窗用例全过；真机 `usage --limit 5` 显示用户当前真实会话经代理的流量记录（bigmodel glm-5.3-flash 多条 200，tokens 实值）。全仓 9 包 ok。
+
+## [2026-11-20T21:15:00+08:00] evidence: M3-3 配额控制完成
+- quotas 表（migration 5，scope=provider|key + window_seconds + max_tokens）+ provider quota CLI（--scope/--window/--max-tokens，upsert）。
+- 代理语义：请求前查滚动窗口实际用量（读 usage_records，跨重启有效），已达上限即 429（调用前无法预知本次 token，语义为「超限后的下一请求被拒」）；429 错误体含 agentvault_quota_exceeded/scope/ref_id；配额 429 也记 usage（可观测）。
+- 测试：per-key 耗尽（2 过 3 拒，历史总和恰等于上限）、per-provider 独立生效、窗口滚动恢复（1s 窗实测）、错误体结构与无泄漏。-count=3 稳定。全仓 9 包 ok。
+- 部署注意：live 代理启用配额检查但未对 bigmodel 设真实配额（空配置=不限制），避免打断用户当前会话；M3-6 验收需 429 时再临时设小配额。
