@@ -19,6 +19,7 @@ import (
 
 	"github.com/zhezhe-star/AgentVault/internal/app"
 	"github.com/zhezhe-star/AgentVault/internal/proxy"
+	"github.com/zhezhe-star/AgentVault/internal/usage"
 )
 
 // registerServeCommands attaches serve/stop/status to the root.
@@ -91,8 +92,22 @@ func runProxy(cfg app.Config, addr string) error {
 	}
 	defer store.Close()
 
-	// The proxy reads keys from the configured secret backend.
+	// The proxy reads keys from the configured secret backend and records
+	// per-call usage into the same database file (WAL allows both).
+	usageStore, err := usage.Open(cfg.DBPath)
+	if err != nil {
+		return err
+	}
+	defer usageStore.Close()
+
 	proxySrv := proxy.New(store, cfg.Secret, cfg.Service)
+	proxySrv.SetUsageSink(func(r usage.Record) {
+		if err := usageStore.Insert(r); err != nil {
+			// Usage recording must never take the request down; log-free
+			// drop is acceptable (structural no-secret logging).
+			_ = err
+		}
+	})
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

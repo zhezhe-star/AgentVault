@@ -116,3 +116,12 @@
 - 无明文复核：grep 真 key 于改写后 settings.json 零命中；strings agentvault.db 仅含元数据与 ref:bigmodel/primary；钥匙链 security find-generic-password 确认 bigmodel/primary 存在。
 - 控制台：/console/api/overview 返回真实三级结构（bigmodel → primary → 2 模型，token 列真实 0 待 M3）；截图 docs/tasks/m2-7-console.png（tmp-m2-screenshots/ 同步）。
 - **修复 M2-6 遗留 bug 一条**：console 以 /console/ 前缀挂载时 FileServer 在 embed FS 内查 "console/..." 导致 UI 404（API 正常故测试未拦住）；改为 Handler 挂根（内部 mux 精确匹配 /console/api/overview），补 TestConsoleMountedAtRoot 回归。截图为修复后真实页面。
+
+## [2026-11-20T20:20:00+08:00] checkpoint: 决策节点 — M2 里程碑完成，用户确认进入 M3
+
+## [2026-11-20T20:40:00+08:00] evidence: M3-1 调用级用量记录完成
+- internal/usage：usage_records 表（同 DB 文件，独立建表 + 写锁串行化——busy_timeout 仅作用于单连接，50 并发写测试暴露 SQLITE_BUSY 后加 writeMu）。
+- 代理 forward 循环：tee 响应（流式友好），ExtractTokens 双协议解析——OpenAI（prompt/completion_tokens，SSE 末 chunk）与 Anthropic（input/output_tokens，message_start/message_delta）；全 key 耗尽的中继失败也记一条（status=上游状态，tokens=0）。
+- serve 接线：SetUsageSink → usage.Insert，记录失败不影响请求。
+- 测试：落库往返、50 并发无锁死计数正确、OpenAI/Anthropic 各 JSON+SSE 四种形态、垃圾输入零值；proxy 集成测试一次调用恰一条记录且字段完整。全仓 9 包 ok。
+- 真机验证：重启代理后真实 /v1/messages 调用落库 bigmodel|primary|glm-5.3-flash|anthropic|200|17|32|1197。

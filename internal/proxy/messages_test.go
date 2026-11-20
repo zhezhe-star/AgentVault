@@ -8,6 +8,7 @@ import (
 
 	"github.com/zhezhe-star/AgentVault/internal/provider"
 	"github.com/zhezhe-star/AgentVault/internal/secret"
+	"github.com/zhezhe-star/AgentVault/internal/usage"
 )
 
 // fixtureAnthropic adds an Anthropic-compatible provider pointing at the
@@ -164,5 +165,40 @@ func TestConsoleMountedAtRoot(t *testing.T) {
 	defer resp2.Body.Close()
 	if resp2.StatusCode != 200 {
 		t.Fatalf("overview status = %d, want 200", resp2.StatusCode)
+	}
+}
+
+// TestUsageRecordedPerCall pins M3-1: one successful /v1/messages call
+// produces exactly one usage record with real token counts parsed from the
+// upstream response.
+func TestUsageRecordedPerCall(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"type":"message","usage":{"input_tokens":12,"output_tokens":34}}`))
+	}))
+	defer upstream.Close()
+
+	store, sec, svc := fixtureAnthropic(t, upstream.URL)
+	srv := New(store, sec, svc)
+	var records []usage.Record
+	srv.SetUsageSink(func(r usage.Record) { records = append(records, r) })
+	base := startProxy(t, srv)
+
+	resp, err := http.Post(base+"/v1/messages", "application/json",
+		strings.NewReader(`{"model":"anthro-model","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if len(records) != 1 {
+		t.Fatalf("usage records = %d, want 1", len(records))
+	}
+	r := records[0]
+	if r.ProviderID != "mockanthropic" || r.KeyID != "ka" || r.Model != "anthro-model" ||
+		r.Protocol != "anthropic" || r.Status != 200 || r.TokensIn != 12 || r.TokensOut != 34 || r.LatencyMS < 0 {
+		t.Fatalf("unexpected usage record: %+v", r)
 	}
 }

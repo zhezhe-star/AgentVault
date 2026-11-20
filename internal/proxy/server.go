@@ -20,6 +20,7 @@ import (
 	"github.com/zhezhe-star/AgentVault/internal/console"
 	"github.com/zhezhe-star/AgentVault/internal/provider"
 	"github.com/zhezhe-star/AgentVault/internal/secret"
+	"github.com/zhezhe-star/AgentVault/internal/usage"
 )
 
 // UpstreamError carries an upstream status so the handler can relay it.
@@ -42,6 +43,19 @@ type Server struct {
 	client *http.Client
 	mux    *http.ServeMux
 	logger Logger
+	// usageSink receives one record per forwarded request; nil disables
+	// recording (tests that don't care).
+	usageSink func(usage.Record)
+}
+
+// SetUsageSink installs the per-call usage recorder.
+func (s *Server) SetUsageSink(fn func(usage.Record)) { s.usageSink = fn }
+
+// recordUsage is a no-op-safe wrapper around the sink.
+func (s *Server) recordUsage(r usage.Record) {
+	if s.usageSink != nil {
+		s.usageSink(r)
+	}
 }
 
 // New builds a Server over the given stores.
@@ -195,8 +209,14 @@ var wireAnthropic = wire{
 
 // forward is the protocol-agnostic core shared by /v1/chat/completions and
 // /v1/messages: peek the model, route, inject the key per wire, and stream
-// the response back with in-request failover.
+// the response back with in-request failover. Every forwarded request ends
+// in exactly one usage record.
 func (s *Server) forward(w http.ResponseWriter, r *http.Request, wireFlavor wire) {
+	start := time.Now()
+	protocol := "openai"
+	if wireFlavor.upstreamPath == wireAnthropic.upstreamPath {
+		protocol = "anthropic"
+	}
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -217,6 +237,7 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, wireFlavor wire
 	attempted := 0
 	var lastStatus int
 	var lastBody []byte
+	var lastRoute candidate
 	for {
 		route, ok := s.router.pick(req.Model)
 		if !ok {
@@ -228,6 +249,11 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, wireFlavor wire
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(lastStatus)
 				_, _ = w.Write(lastBody)
+				s.recordUsage(usage.Record{
+					ProviderID: lastRoute.providerID, KeyID: lastRoute.keyID, Model: req.Model,
+					Protocol: protocol, Status: lastStatus,
+					LatencyMS: time.Since(start).Milliseconds(),
+				})
 			}
 			return
 		}
@@ -280,23 +306,34 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, wireFlavor wire
 			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 			resp.Body.Close()
 			lastStatus, lastBody = resp.StatusCode, respBody
+			lastRoute = route
 			s.router.fail(route)
 			s.keys.invalidate(route.providerID, route.keyID)
 			attempted++
 			continue
 		}
-		defer resp.Body.Close()
 		s.router.success(route)
 
 		// Copy upstream response headers and stream the body through (SSE
-		// transparently included: no buffering beyond header flush).
+		// transparently included: no buffering beyond header flush). A
+		// bounded tee captures the bytes so usage can be extracted after
+		// the stream ends.
 		for k, vs := range resp.Header {
 			for _, v := range vs {
 				w.Header().Add(k, v)
 			}
 		}
 		w.WriteHeader(resp.StatusCode)
-		_ = flushCopy(w, resp.Body)
+		var captured bytes.Buffer
+		_ = flushCopy(w, io.TeeReader(resp.Body, &captured))
+		resp.Body.Close()
+		tokensIn, tokensOut := usage.ExtractTokens(captured.Bytes())
+		s.recordUsage(usage.Record{
+			ProviderID: route.providerID, KeyID: route.keyID, Model: req.Model,
+			Protocol: protocol, Status: resp.StatusCode,
+			TokensIn: tokensIn, TokensOut: tokensOut,
+			LatencyMS: time.Since(start).Milliseconds(),
+		})
 		return
 	}
 }

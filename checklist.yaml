@@ -128,11 +128,11 @@ tasks:
   - id: M3-1
     milestone: M3
     title: 调用级用量记录（provider/model/key-id/tokens/latency/status，WAL 模式）
-    status: pending
+    status: complete
     acceptance: >
       集成测试：经代理的一次调用产生一条 usage 记录，字段完整；并发 50 请求无锁死、
       记录数正确
-    evidence: ""
+    evidence: "[2026-11-20T20:40:00+08:00] usage 5 测试 + proxy 集成全过；真机调用落库 17/32 tokens，见 run-log M3-1"
 
   - id: M3-2
     milestone: M3
