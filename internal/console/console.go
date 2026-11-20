@@ -10,6 +10,7 @@ import (
 	"net/http"
 
 	"github.com/zhezhe-star/AgentVault/internal/provider"
+	"github.com/zhezhe-star/AgentVault/internal/usage"
 )
 
 //go:embed static
@@ -48,8 +49,9 @@ type ModelView struct {
 }
 
 // Handler returns the console HTTP handler: the embedded UI at / and the
-// overview API at /console/api/overview.
-func Handler(store *provider.Store, keyRef func(providerID, keyID string) string) http.Handler {
+// overview API at /console/api/overview. The usage store feeds the model
+// tier's cumulative token counts (real data only; zero when no traffic).
+func Handler(store *provider.Store, usageStore *usage.Store, keyRef func(providerID, keyID string) string) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/console/api/overview", func(w http.ResponseWriter, _ *http.Request) {
@@ -74,9 +76,14 @@ func Handler(store *provider.Store, keyRef func(providerID, keyID string) string
 			for _, k := range keys {
 				kv := KeyView{ID: k.ID, Status: k.Status, Ref: keyRef(p.ID, k.ID)}
 				for _, m := range models {
-					if m.KeyID == k.ID {
-						kv.Models = append(kv.Models, ModelView{Name: m.Name, Upstream: m.Upstream})
+					if m.KeyID != k.ID {
+						continue
 					}
+					mv := ModelView{Name: m.Name, Upstream: m.Upstream}
+					if usageStore != nil {
+						mv.TokensIn, mv.TokensOut, _ = usageStore.SumTokens(m.Name)
+					}
+					kv.Models = append(kv.Models, mv)
 				}
 				pv.Keys = append(pv.Keys, kv)
 			}

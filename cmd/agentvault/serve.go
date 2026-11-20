@@ -101,6 +101,7 @@ func runProxy(cfg app.Config, addr string) error {
 	defer usageStore.Close()
 
 	proxySrv := proxy.New(store, cfg.Secret, cfg.Service)
+	proxySrv.EnableUsage(usageStore)
 	proxySrv.EnableQuotas(store, usageStore)
 	proxySrv.SetUsageSink(func(r usage.Record) {
 		if err := usageStore.Insert(r); err != nil {

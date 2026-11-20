@@ -326,6 +326,15 @@ func (s *Store) SetQuota(q Quota) error {
 	return nil
 }
 
+// DeleteQuota removes a quota entry.
+func (s *Store) DeleteQuota(scope, refID string) error {
+	_, err := s.db.Exec(`DELETE FROM quotas WHERE scope = ? AND ref_id = ?`, scope, refID)
+	if err != nil {
+		return fmt.Errorf("provider: delete quota: %w", err)
+	}
+	return nil
+}
+
 // ListQuotas returns every configured quota.
 func (s *Store) ListQuotas() ([]Quota, error) {
 	rows, err := s.db.Query(`SELECT scope, ref_id, window_seconds, max_tokens FROM quotas`)

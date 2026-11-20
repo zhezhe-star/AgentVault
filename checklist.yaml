@@ -213,12 +213,15 @@ tasks:
   - id: M3-6
     milestone: M3
     title: 前端 token 统计接入真实用量库（三级视图第 3 层生效）
-    status: pending
+    status: complete
     acceptance: >
       前端每模型 token 数与 agentvault usage / SQL 直查三方一致；展示的是迁移后
       真实流量累计值（真机截图记 run-log，非 mock）；真实流量下触发一次配额 429
       并可在前端/CLI 观测
-    evidence: ""
+    evidence: >
+      run-log 2026-11-20T22:00 条目：三方一致性核对通过；真实流量 429
+      （quota 3000/1m，结构化错误体，429 落 usage）；截图
+      docs/tasks/m3-6-console-tokens.png；全仓测试 ok
 
   - id: M3-5
     milestone: M3

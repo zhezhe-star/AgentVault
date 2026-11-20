@@ -12,6 +12,7 @@ import (
 	"github.com/zhezhe-star/AgentVault/internal/app"
 	"github.com/zhezhe-star/AgentVault/internal/provider"
 	"github.com/zhezhe-star/AgentVault/internal/secret"
+	"github.com/zhezhe-star/AgentVault/internal/usage"
 )
 
 func fixture(t *testing.T) *provider.Store {
@@ -29,7 +30,7 @@ func fixture(t *testing.T) *provider.Store {
 
 func TestOverviewAPIRealData(t *testing.T) {
 	store := fixture(t)
-	srv := httptest.NewServer(Handler(store, app.KeyRef))
+	srv := httptest.NewServer(Handler(store, nil, app.KeyRef))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/console/api/overview")
@@ -58,7 +59,7 @@ func TestOverviewAPIRealData(t *testing.T) {
 
 func TestUIPageServed(t *testing.T) {
 	store := fixture(t)
-	srv := httptest.NewServer(Handler(store, app.KeyRef))
+	srv := httptest.NewServer(Handler(store, nil, app.KeyRef))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/")
@@ -78,7 +79,7 @@ func TestNoSecretInOverview(t *testing.T) {
 	store := fixture(t)
 	sec := secret.NewMemoryStore()
 	_ = sec.Set("agentvault", "bigmodel/primary", "super-secret-key-material")
-	srv := httptest.NewServer(Handler(store, app.KeyRef))
+	srv := httptest.NewServer(Handler(store, nil, app.KeyRef))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/console/api/overview")
@@ -89,5 +90,42 @@ func TestNoSecretInOverview(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if strings.Contains(string(body), "super-secret-key-material") {
 		t.Fatal("console API leaked secret")
+	}
+}
+
+// TestOverviewRealTokens pins M3-6: the model tier shows cumulative real
+// tokens from the usage store, matching what usage CLI would report.
+func TestOverviewRealTokens(t *testing.T) {
+	store := fixture(t)
+	ustore, err := usage.Open(filepath.Join(t.TempDir(), "usage.db"))
+	if err != nil {
+		t.Fatalf("usage open: %v", err)
+	}
+	defer ustore.Close()
+	if err := ustore.Insert(usage.Record{ProviderID: "bigmodel", KeyID: "primary",
+		Model: "glm-5.3", Protocol: "anthropic", Status: 200,
+		TokensIn: 100, TokensOut: 40}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if err := ustore.Insert(usage.Record{ProviderID: "bigmodel", KeyID: "primary",
+		Model: "glm-5.3", Protocol: "anthropic", Status: 200,
+		TokensIn: 10, TokensOut: 5}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	srv := httptest.NewServer(Handler(store, ustore, app.KeyRef))
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/console/api/overview")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	var out Overview
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	m := out.Providers[0].Keys[0].Models[0]
+	if m.TokensIn != 110 || m.TokensOut != 45 {
+		t.Fatalf("tokens = %d/%d, want 110/45", m.TokensIn, m.TokensOut)
 	}
 }

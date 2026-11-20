@@ -45,12 +45,22 @@ type Server struct {
 	logger Logger
 	// usageSink receives one record per forwarded request; nil disables
 	// recording (tests that don't care).
-	usageSink func(usage.Record)
-	quotas    *quotaChecker
+	usageSink  func(usage.Record)
+	quotas     *quotaChecker
+	usageStore *usage.Store
 }
 
 // SetUsageSink installs the per-call usage recorder.
 func (s *Server) SetUsageSink(fn func(usage.Record)) { s.usageSink = fn }
+
+// EnableUsage attaches the usage store so the console shows cumulative
+// real token counts per model.
+func (s *Server) EnableUsage(u *usage.Store) { s.usageStore = u }
+
+// consoleHandler builds the console handler against current state.
+func (s *Server) consoleHandler() http.Handler {
+	return console.Handler(s.store, s.usageStore, app.KeyRef)
+}
 
 // EnableQuotas turns on rolling-window token enforcement backed by the
 // given stores (provider store for quota config, usage store for counts).
@@ -87,9 +97,11 @@ func New(store *provider.Store, sec secret.Store, service string) *Server {
 	s.mux.HandleFunc("/admin/routing", s.handleRoutingStatus)
 	// The console handler is mounted at root: its own mux matches
 	// /console/api/overview exactly and serves the embedded UI everywhere
-	// else. Mounting it under /console/ instead would leave the file server
-	// looking up "console/..." inside the embedded FS (404).
-	s.mux.Handle("/", console.Handler(store, app.KeyRef))
+	// else. Mounted through a delegating closure so EnableUsage (called
+	// after New) is visible to later requests.
+	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		s.consoleHandler().ServeHTTP(w, r)
+	})
 	return s
 }
 

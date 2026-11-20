@@ -143,3 +143,9 @@
 - 观测：/admin/routing 增 breaker_keys，status CLI 输出 breaker keys 行。
 - 测试：TripAndHalfOpenRecovers 全链路（触发→探测前拒绝→探测放行→失败重开→成功闭合→正常服务）-count=3 稳定。全仓 9 包 ok。
 - 遗留说明：全 key 耗尽仍中继最后上游状态（429）——保留原语义（客户端可重试），未改 503；已在 M2-3 记录。
+
+## [2026-11-20T22:00:00+08:00] evidence: M3-6 前端 token 统计接入真实用量库完成
+- console Handler 增加 usage store 参数，模型层 SumTokens 聚合真实 tokens_in/out；代理经闭包每请求重建 handler（否则 New 时 usageStore 仍为 nil，真实页面 0/0——测试未拦住的第二个挂载类 bug）。
+- 三方一致性核对：console / `agentvault usage` / 直接 SQL 三处 token 数字一致（当时 glm-5.3-flash 128073/56227）。
+- 真实流量 429 验收：provider bigmodel 设 quota 3000 tokens/1m → 下一请求即 429，错误体 `{"error":{"message":"quota exceeded","ref_id":"bigmodel","scope":"provider","type":"agentvault_quota_exceeded"}}`；429 行落 usage_records（含用户 live 会话两条，客户端重试成功）；DELETE 配额后恢复 200。
+- 截图 docs/tasks/m3-6-console-tokens.png（真实累计：glm-5.3-flash 144494/65129、glm-4.5-air 351/14577）。全仓 9 包 ok，vet/gofmt 干净。
