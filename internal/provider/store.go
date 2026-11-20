@@ -27,10 +27,14 @@ const (
 
 // Provider is a model provider (e.g. bigmodel, deepseek, volcengine ark).
 type Provider struct {
-	ID        string
-	Name      string
-	BaseURL   string
-	CreatedAt time.Time
+	ID      string
+	Name    string
+	BaseURL string
+	// AnthropicBaseURL is the provider's Anthropic-compatible endpoint
+	// (e.g. https://open.bigmodel.cn/api/anthropic), used by the
+	// /v1/messages passthrough. Empty means the provider is OpenAI-only.
+	AnthropicBaseURL string
+	CreatedAt        time.Time
 }
 
 // Key is one credential slot of a provider. The actual secret lives in the
@@ -82,6 +86,9 @@ var migrations = []string{
 	)`,
 	`CREATE INDEX idx_keys_provider ON keys(provider_id)`,
 	`CREATE INDEX idx_models_key ON models(key_id)`,
+	// Migration 4: optional Anthropic-compatible endpoint per provider for
+	// the /v1/messages passthrough. Empty string = OpenAI-only provider.
+	`ALTER TABLE providers ADD COLUMN anthropic_base_url TEXT NOT NULL DEFAULT ''`,
 }
 
 // Store wraps the SQLite database.
@@ -154,8 +161,8 @@ func (s *Store) migrate() error {
 // CreateProvider inserts a new provider.
 func (s *Store) CreateProvider(p Provider) error {
 	p.CreatedAt = time.Now().UTC()
-	_, err := s.db.Exec(`INSERT INTO providers (id, name, base_url, created_at) VALUES (?,?,?,?)`,
-		p.ID, p.Name, p.BaseURL, p.CreatedAt.Format(time.RFC3339))
+	_, err := s.db.Exec(`INSERT INTO providers (id, name, base_url, anthropic_base_url, created_at) VALUES (?,?,?,?,?)`,
+		p.ID, p.Name, p.BaseURL, p.AnthropicBaseURL, p.CreatedAt.Format(time.RFC3339))
 	if err != nil {
 		return fmt.Errorf("provider: create provider: %w", err)
 	}
@@ -164,7 +171,7 @@ func (s *Store) CreateProvider(p Provider) error {
 
 // ListProviders returns all providers ordered by creation time.
 func (s *Store) ListProviders() ([]Provider, error) {
-	rows, err := s.db.Query(`SELECT id, name, base_url, created_at FROM providers ORDER BY created_at`)
+	rows, err := s.db.Query(`SELECT id, name, base_url, anthropic_base_url, created_at FROM providers ORDER BY created_at`)
 	if err != nil {
 		return nil, fmt.Errorf("provider: list providers: %w", err)
 	}
@@ -173,7 +180,7 @@ func (s *Store) ListProviders() ([]Provider, error) {
 	for rows.Next() {
 		var p Provider
 		var created string
-		if err := rows.Scan(&p.ID, &p.Name, &p.BaseURL, &created); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.BaseURL, &p.AnthropicBaseURL, &created); err != nil {
 			return nil, fmt.Errorf("provider: scan provider: %w", err)
 		}
 		p.CreatedAt, _ = time.Parse(time.RFC3339, created)
@@ -186,8 +193,8 @@ func (s *Store) ListProviders() ([]Provider, error) {
 func (s *Store) GetProvider(id string) (Provider, error) {
 	var p Provider
 	var created string
-	err := s.db.QueryRow(`SELECT id, name, base_url, created_at FROM providers WHERE id = ?`, id).
-		Scan(&p.ID, &p.Name, &p.BaseURL, &created)
+	err := s.db.QueryRow(`SELECT id, name, base_url, anthropic_base_url, created_at FROM providers WHERE id = ?`, id).
+		Scan(&p.ID, &p.Name, &p.BaseURL, &p.AnthropicBaseURL, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return p, ErrNotFound
 	}

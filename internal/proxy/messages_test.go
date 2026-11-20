@@ -1,0 +1,140 @@
+package proxy
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/zhezhe-star/AgentVault/internal/provider"
+	"github.com/zhezhe-star/AgentVault/internal/secret"
+)
+
+// fixtureAnthropic adds an Anthropic-compatible provider pointing at the
+// given upstream URL (registered under a distinct provider id).
+func fixtureAnthropic(t *testing.T, upstreamURL string) (*provider.Store, secret.Store, string) {
+	t.Helper()
+	store, sec, svc := fixture(t, "http://127.0.0.1:1")
+	if err := store.CreateProvider(provider.Provider{
+		ID: "mockanthropic", Name: "MockAnthropic",
+		BaseURL: "http://127.0.0.1:1", AnthropicBaseURL: upstreamURL,
+	}); err != nil {
+		t.Fatalf("CreateProvider anthropic: %v", err)
+	}
+	if err := store.CreateKey(provider.Key{ID: "ka", ProviderID: "mockanthropic", SecretID: "ref-a", Status: provider.KeyActive, Weight: 1}); err != nil {
+		t.Fatalf("CreateKey anthropic: %v", err)
+	}
+	if err := sec.Set("agentvault", "mockanthropic/ka", testKey); err != nil {
+		t.Fatalf("secret set: %v", err)
+	}
+	if err := store.CreateModel(provider.Model{ID: "ma", ProviderID: "mockanthropic", KeyID: "ka", Name: "anthro-model", Upstream: "glm-4.7"}); err != nil {
+		t.Fatalf("CreateModel anthropic: %v", err)
+	}
+	return store, sec, svc
+}
+
+func TestMessagesPassthrough(t *testing.T) {
+	var gotKey, gotVersion, gotPath string
+	var gotBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotKey = r.Header.Get("x-api-key")
+		gotVersion = r.Header.Get("anthropic-version")
+		gotPath = r.URL.Path
+		gotBody, _ = bufReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn"}`))
+	}))
+	defer upstream.Close()
+
+	store, sec, svc := fixtureAnthropic(t, upstream.URL)
+	base := startProxy(t, New(store, sec, svc))
+
+	req, _ := http.NewRequest(http.MethodPost, base+"/v1/messages",
+		strings.NewReader(`{"model":"anthro-model","max_tokens":32,"messages":[{"role":"user","content":"hello"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("anthropic-version", "2023-06-01")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post messages: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if gotPath != "/v1/messages" {
+		t.Fatalf("upstream path = %q, want /v1/messages", gotPath)
+	}
+	if gotKey != testKey {
+		t.Fatalf("upstream x-api-key = %q, want key", gotKey)
+	}
+	if gotVersion != "2023-06-01" {
+		t.Fatalf("anthropic-version not passed through: %q", gotVersion)
+	}
+	if !strings.Contains(string(gotBody), `"anthro-model"`) {
+		t.Fatalf("body not forwarded: %s", gotBody)
+	}
+	// Response body passes through untouched (Anthropic message shape).
+	buf := make([]byte, 4096)
+	n, _ := resp.Body.Read(buf)
+	if !strings.Contains(string(buf[:n]), `"type":"message"`) {
+		t.Fatalf("response not Anthropic shape: %s", buf[:n])
+	}
+}
+
+func TestMessagesOpenAIOnlyProviderRejected(t *testing.T) {
+	// The base fixture's provider has no anthropic_base_url, so a
+	// /v1/messages call to its model must 404 without leaking anything.
+	store, sec, svc := fixture(t, "http://127.0.0.1:1")
+	base := startProxy(t, New(store, sec, svc))
+
+	resp, err := http.Post(base+"/v1/messages", "application/json",
+		strings.NewReader(`{"model":"test-model","max_tokens":1,"messages":[]}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+	buf := make([]byte, 4096)
+	n, _ := resp.Body.Read(buf)
+	if strings.Contains(string(buf[:n]), testKey) {
+		t.Fatal("error body leaked key")
+	}
+}
+
+func TestMessagesFailover(t *testing.T) {
+	var hits int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		if hits == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":"rate limited"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"type":"message"}`))
+	}))
+	defer upstream.Close()
+
+	store, sec, svc := fixtureAnthropic(t, upstream.URL)
+	// Two keys on the anthropic provider; first one cools down, second serves.
+	if err := store.CreateKey(provider.Key{ID: "kb", ProviderID: "mockanthropic", SecretID: "ref-b", Status: provider.KeyActive, Weight: 1}); err != nil {
+		t.Fatalf("CreateKey kb: %v", err)
+	}
+	if err := sec.Set("agentvault", "mockanthropic/kb", testKey); err != nil {
+		t.Fatalf("secret set kb: %v", err)
+	}
+
+	base := startProxy(t, New(store, sec, svc))
+	resp, err := http.Post(base+"/v1/messages", "application/json",
+		strings.NewReader(`{"model":"anthro-model","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || hits != 2 {
+		t.Fatalf("failover failed: status=%d hits=%d", resp.StatusCode, hits)
+	}
+}

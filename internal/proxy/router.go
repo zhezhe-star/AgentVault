@@ -14,10 +14,11 @@ const DefaultCooldown = 60 * time.Second
 
 // candidate is one routable upstream choice.
 type candidate struct {
-	providerID string
-	keyID      string
-	baseURL    string
-	weight     int
+	providerID       string
+	keyID            string
+	baseURL          string
+	anthropicBaseURL string
+	weight           int
 }
 
 // router picks upstreams among the active keys serving a model, rotating
@@ -64,7 +65,7 @@ func (r *router) candidates(model string) ([]candidate, error) {
 			if err != nil {
 				continue
 			}
-			out = append(out, candidate{providerID: m.ProviderID, keyID: k.ID, baseURL: p.BaseURL, weight: k.Weight})
+			out = append(out, candidate{providerID: m.ProviderID, keyID: k.ID, baseURL: p.BaseURL, anthropicBaseURL: p.AnthropicBaseURL, weight: k.Weight})
 		}
 	}
 	// Deterministic order: higher weight first, then key id as a stable tiebreak.

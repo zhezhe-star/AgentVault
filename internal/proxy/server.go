@@ -57,6 +57,7 @@ func New(store *provider.Store, sec secret.Store, service string) *Server {
 		logger: func(_ RequestLog) {},
 	}
 	s.mux.HandleFunc("/v1/chat/completions", s.handleChat)
+	s.mux.HandleFunc("/v1/messages", s.handleMessages)
 	s.mux.HandleFunc("/v1/models", s.handleModels)
 	s.mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -159,6 +160,40 @@ type chatRequest struct {
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
+	s.forward(w, r, wireOpenAI)
+}
+
+func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
+	s.forward(w, r, wireAnthropic)
+}
+
+// wire describes how a protocol flavor reaches its upstream: the path to
+// append to the candidate's base URL and how the key is presented.
+type wire struct {
+	upstreamPath string
+	setAuth      func(req *http.Request, key string)
+}
+
+var wireOpenAI = wire{
+	upstreamPath: "/chat/completions",
+	setAuth: func(req *http.Request, key string) {
+		req.Header.Set("Authorization", "Bearer "+key)
+	},
+}
+
+// wireAnthropic forwards Anthropic Messages requests untouched: only the
+// credential header is swapped; anthropic-version and the body pass as-is.
+var wireAnthropic = wire{
+	upstreamPath: "/v1/messages",
+	setAuth: func(req *http.Request, key string) {
+		req.Header.Set("x-api-key", key)
+	},
+}
+
+// forward is the protocol-agnostic core shared by /v1/chat/completions and
+// /v1/messages: peek the model, route, inject the key per wire, and stream
+// the response back with in-request failover.
+func (s *Server) forward(w http.ResponseWriter, r *http.Request, wireFlavor wire) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -205,14 +240,29 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		upstreamURL := strings.TrimRight(route.baseURL, "/") + "/chat/completions"
+		base := route.baseURL
+		if wireFlavor.upstreamPath == wireAnthropic.upstreamPath {
+			base = route.anthropicBaseURL
+			if base == "" {
+				writeError(w, http.StatusNotFound, "provider does not serve the Anthropic protocol")
+				return
+			}
+		}
+		upstreamURL := strings.TrimRight(base, "/") + wireFlavor.upstreamPath
 		upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(body))
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "build upstream request")
 			return
 		}
 		upReq.Header.Set("Content-Type", "application/json")
-		upReq.Header.Set("Authorization", "Bearer "+key)
+		wireFlavor.setAuth(upReq, key)
+		// Protocol headers pass through; the client's credential headers are
+		// deliberately NOT forwarded (the vault key replaces them).
+		for _, h := range []string{"anthropic-version", "anthropic-beta", "accept"} {
+			if v := r.Header.Get(h); v != "" {
+				upReq.Header.Set(h, v)
+			}
+		}
 
 		resp, err := s.client.Do(upReq)
 		if err != nil {

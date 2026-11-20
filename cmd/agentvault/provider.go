@@ -29,7 +29,7 @@ func providerCmd() *cobra.Command {
 }
 
 func providerAddCmd() *cobra.Command {
-	var name, baseURL string
+	var name, baseURL, anthropicBaseURL string
 	cmd := &cobra.Command{
 		Use:   "add <provider-id>",
 		Short: "Register a provider (metadata only; add keys separately)",
@@ -48,7 +48,7 @@ func providerAddCmd() *cobra.Command {
 			}
 			defer store.Close()
 			if err := store.CreateProvider(provider.Provider{
-				ID: args[0], Name: name, BaseURL: baseURL,
+				ID: args[0], Name: name, BaseURL: baseURL, AnthropicBaseURL: anthropicBaseURL,
 			}); err != nil {
 				return err
 			}
@@ -58,6 +58,8 @@ func providerAddCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&name, "name", "", "display name")
 	cmd.Flags().StringVar(&baseURL, "base-url", "", "provider API base URL")
+	cmd.Flags().StringVar(&anthropicBaseURL, "anthropic-base-url", "",
+		"optional Anthropic-compatible endpoint for /v1/messages passthrough")
 	_ = cmd.MarkFlagRequired("name")
 	_ = cmd.MarkFlagRequired("base-url")
 	return cmd
@@ -112,8 +114,8 @@ func providerShowCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "provider: %s (%s)\nbase-url: %s\ncreated: %s\n",
-				p.ID, p.Name, p.BaseURL, p.CreatedAt.Format(time.RFC3339))
+			fmt.Fprintf(cmd.OutOrStdout(), "provider: %s (%s)\nbase-url: %s\nanthropic-base-url: %s\ncreated: %s\n",
+				p.ID, p.Name, p.BaseURL, p.AnthropicBaseURL, p.CreatedAt.Format(time.RFC3339))
 			keys, err := store.ListKeys(p.ID)
 			if err != nil {
 				return err
