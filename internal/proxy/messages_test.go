@@ -138,3 +138,31 @@ func TestMessagesFailover(t *testing.T) {
 		t.Fatalf("failover failed: status=%d hits=%d", resp.StatusCode, hits)
 	}
 }
+
+// TestConsoleMountedAtRoot pins the mounting fix: the embedded UI must be
+// reachable at / and the overview API at /console/api/overview through the
+// proxy mux (the /console/ prefix mount used to 404).
+func TestConsoleMountedAtRoot(t *testing.T) {
+	store, sec, svc := fixture(t, "http://127.0.0.1:1")
+	base := startProxy(t, New(store, sec, svc))
+
+	resp, err := http.Get(base + "/")
+	if err != nil {
+		t.Fatalf("get /: %v", err)
+	}
+	defer resp.Body.Close()
+	buf := make([]byte, 8192)
+	n, _ := resp.Body.Read(buf)
+	if resp.StatusCode != 200 || !strings.Contains(string(buf[:n]), "AgentVault") {
+		t.Fatalf("/ did not serve console UI: status=%d body=%q", resp.StatusCode, buf[:n])
+	}
+
+	resp2, err := http.Get(base + "/console/api/overview")
+	if err != nil {
+		t.Fatalf("get overview: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != 200 {
+		t.Fatalf("overview status = %d, want 200", resp2.StatusCode)
+	}
+}

@@ -97,3 +97,22 @@
 - internal/console：embed 静态页 + /console/api/overview，三级视图 provider → key(ref) → 模型(token 列为真实 0，M3 接用量库)。
 - 挂载到代理同进程：/console/ 与 / 静态服务；仅 127.0.0.1（复用 listener 保护）。
 - 测试：overview 返回真实库数据、index 可访问、即使后端有 secret API 也不含密钥。全仓 7 包 ok，vet/gofmt 干净。
+
+## [2026-11-20T19:30:00+08:00] decision: 决策节点 3 通过 — M2-7a + M2-7 真机迁移批准
+- 用户询问协议层开源复用件，调研结论：Olla（Go，/v1/messages passthrough）、m0n0x41d/anthropic-proxy-rs（Rust，协议转换）、Tangerg/scope（Go 线协议库）、LiteLLM passthrough。均不引入——代理是透明透传（仅注入凭据头），自实现约 50 行，依赖面更小。
+- 方案：M2-7a = /v1/messages 透传 + providers.anthropic_base_url 字段；M2-7 = ~/.claude/settings.json 真机迁移。用户「批准」。
+
+## [2026-11-20T19:50:00+08:00] evidence: M2-7a /v1/messages 透传完成（commit d1e8d30）
+- migration 4：providers.anthropic_base_url（默认空 = OpenAI-only）；provider add 增 --anthropic-base-url。
+- forward 循环协议无关化：/v1/messages 透传 body 与 anthropic-version/anthropic-beta/accept 头，注入 x-api-key；客户端凭据头不转发。
+- 新增 provider add-model 命令（M1 CLI 缺口补齐）。测试：透传/OpenAI-only 拒绝/故障切换 3 用例；全仓 8 包 ok，vet/gofmt 干净。
+
+## [2026-11-20T19:55:00+08:00] evidence: M2-7 第一次真机迁移完成 — 首次上线
+- 迁移对象：~/.claude/settings.json（GLM key，指纹 f693…xx5d18 掩码记法）。备份 settings.json.bak-20261120-193220。
+- 步骤：provider add bigmodel（含 anthropic-base-url）→ add-key primary（token 从 settings.json 管道入 macOS 钥匙链，不回显）→ add-model ×2（glm-5.3-flash / glm-4.5-air）→ serve --daemon（pid 12098, 127.0.0.1:8787）。
+- 冒烟：curl 经代理 /v1/messages 真实返回 bigmodel Anthropic 格式响应（真实 token usage: input 20/output 64）。
+- 改写：ANTHROPIC_BASE_URL → http://127.0.0.1:8787；ANTHROPIC_AUTH_TOKEN → 占位符 agentvault-local-placeholder（真 key 仅存钥匙链）。diff 仅此两处，其余 env 原样。
+- 真机验证：claude -p 无头会话经 127.0.0.1:8787 成功获得 glm-5.3-flash 真实回复（Claude Code 侧确认请求过代理网关）。
+- 无明文复核：grep 真 key 于改写后 settings.json 零命中；strings agentvault.db 仅含元数据与 ref:bigmodel/primary；钥匙链 security find-generic-password 确认 bigmodel/primary 存在。
+- 控制台：/console/api/overview 返回真实三级结构（bigmodel → primary → 2 模型，token 列真实 0 待 M3）；截图 docs/tasks/m2-7-console.png（tmp-m2-screenshots/ 同步）。
+- **修复 M2-6 遗留 bug 一条**：console 以 /console/ 前缀挂载时 FileServer 在 embed FS 内查 "console/..." 导致 UI 404（API 正常故测试未拦住）；改为 Handler 挂根（内部 mux 精确匹配 /console/api/overview），补 TestConsoleMountedAtRoot 回归。截图为修复后真实页面。

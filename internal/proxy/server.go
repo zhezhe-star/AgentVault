@@ -64,8 +64,11 @@ func New(store *provider.Store, sec secret.Store, service string) *Server {
 		_, _ = w.Write([]byte("ok"))
 	})
 	s.mux.HandleFunc("/admin/routing", s.handleRoutingStatus)
-	s.mux.Handle("/console", http.RedirectHandler("/console/", http.StatusMovedPermanently))
-	s.mux.Handle("/console/", console.Handler(store, app.KeyRef))
+	// The console handler is mounted at root: its own mux matches
+	// /console/api/overview exactly and serves the embedded UI everywhere
+	// else. Mounting it under /console/ instead would leave the file server
+	// looking up "console/..." inside the embedded FS (404).
+	s.mux.Handle("/", console.Handler(store, app.KeyRef))
 	return s
 }
 

@@ -24,7 +24,7 @@ func providerCmd() *cobra.Command {
 		Use:   "provider",
 		Short: "Manage model providers and their keys",
 	}
-	cmd.AddCommand(providerAddCmd(), providerListCmd(), providerShowCmd(), providerRevokeCmd())
+	cmd.AddCommand(providerAddCmd(), providerListCmd(), providerShowCmd(), providerRevokeCmd(), providerAddModelCmd())
 	return cmd
 }
 
@@ -225,4 +225,45 @@ func readSecret(cmd *cobra.Command) (string, error) {
 		return "", fmt.Errorf("read key: %w", err)
 	}
 	return strings.TrimSpace(string(raw)), nil
+}
+
+func providerAddModelCmd() *cobra.Command {
+	var keyID, upstream string
+	cmd := &cobra.Command{
+		Use:   "add-model <provider-id> <model-name>",
+		Short: "Register a model mapping under a provider key (model-name is what clients request)",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if keyID == "" {
+				return fmt.Errorf("%w: --key-id is required", app.ErrFlagMissing)
+			}
+			if upstream == "" {
+				upstream = args[1] // same id at the provider by default
+			}
+			cfg, err := app.Resolve()
+			if err != nil {
+				return err
+			}
+			store, err := cfg.OpenStore()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			m := provider.Model{
+				ID:         args[0] + "/" + keyID + "/" + args[1],
+				ProviderID: args[0], KeyID: keyID,
+				Name: args[1], Upstream: upstream,
+			}
+			if err := store.CreateModel(m); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "model %s -> %s (provider %s, key %s) added\n",
+				m.Name, m.Upstream, m.ProviderID, m.KeyID)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&keyID, "key-id", "", "provider key slot this model routes through")
+	cmd.Flags().StringVar(&upstream, "upstream", "", "model id at the provider (default: the requested model name)")
+	_ = cmd.MarkFlagRequired("key-id")
+	return cmd
 }
