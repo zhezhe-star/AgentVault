@@ -163,12 +163,16 @@ tasks:
   - id: M4-1
     milestone: M4
     title: 明文扫描器（探测 shell rc、.env、litellm config、agent 工具设置/MCP env 块；按消费方式三分类）
-    status: pending
+    status: complete
     acceptance: >
       在含测试 fixture（假 key 格式）的临时 HOME 下：扫描器输出每处命中的
       文件路径/行号/变量名/key 指纹（前后 4 位掩码）与分类标签
       （proxy-attach / run-inject / compliant），不输出完整明文；未命中时正常退出码
-    evidence: ""
+    evidence: >
+      run-log 2026-11-22T00:10 条目：internal/migrate 四类解析器 + 三分类 +
+      掩码输出（构造上无完整明文）；fixture 测试全过；真机只读扫描 11 处
+      明文（.zshrc 1 / litellm 3 / codex toml 7），~/.claude/settings.json
+      零命中（M2-7 有效）
 
   - id: M4-2
     milestone: M4

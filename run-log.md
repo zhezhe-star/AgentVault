@@ -156,3 +156,12 @@
 - docs/design/architecture.md：单二进制架构图、密钥安全模型（明文仅存钥匙链+进程内存，leakscan 固化为回归测试）、wire 抽象转发循环、路由容错/配额/数据层/控制台设计、M4 三分类迁移规划。
 - 全量套件 -count=1 重跑绿（9 包 ok），vet/gofmt 干净。
 - **M3 里程碑完成**：M3-1…M3-4、M3-6 全部 complete（M3-5 本条收尾）。M3 验收口径满足：真实流量 token 统计三方一致（M3-6 证据）+ 真实流量 429 可观测（M3-6 证据）+ 文档齐备（本条）。
+
+## [2026-11-22T00:05:00+08:00] decision: 决策节点 — M3 里程碑确认，用户批准进入 M4
+- 用户「继续，进入 M4」。M4 目标 = 最终验收：真机明文落盘点清零。改写真实点文件前逐项经决策节点 3 批准。
+
+## [2026-11-22T00:10:00+08:00] evidence: M4-1 明文扫描器完成
+- internal/migrate：四类解析器（shell export / JSON env 块 / YAML api_key / TOML env 块），覆盖 .zshrc/.zshenv/.bashrc/.claude/settings.json/litellm config.yaml/.codex config.toml；三分类（proxy-attach/run-inject/compliant，默认 claude+litellm 走代理、shell 与 MCP env 走 run-inject，SetClassification 可覆盖）。
+- 输出构造上无完整明文：Mask 仅前 4+后 4+长度；占位符（agentvault-local-placeholder/sk-xxx）与变量引用（${...}）不报——后者是真机首跑发现的误报（.zshrc 第 9 行已是引用），补过滤并加回归用例。
+- 测试：fixture HOME 全四文件、掩码不泄漏、占位符/非凭据变量不报、默认分类与覆盖、空 home、Mask 单测。全仓 10 包 ok。
+- 真机只读扫描：11 处明文——.zshrc ARK_API_KEY（ark-…fc2a）、litellm config 3 处 api_key（其中 GLM 两处同值 f693…hXcM 即已迁钥匙链的 bigmodel key、另 deepseek sk-d…a22f）、.codex config.toml 7 处（ark ×3、GLM f693…hXcM ×3、Z_AI f693…hXcM 同值、deepseek sk-9…0119）；~/.claude/settings.json 零命中（M2-7 迁移保持有效）。
