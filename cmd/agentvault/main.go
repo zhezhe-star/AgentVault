@@ -35,6 +35,7 @@ local OpenAI-compatible proxy so plaintext keys never live in config files.`,
 	registerUsageCommands(root)
 	registerScanCommands(root, out)
 	registerImportCommands(root, out)
+	registerRunCommands(root, out)
 	return root
 }
 

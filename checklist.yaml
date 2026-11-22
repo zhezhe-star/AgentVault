@@ -209,7 +209,11 @@ tasks:
       agentvault run --env VAR=ref:provider/key -- printenv VAR 输出正确值且
       父进程环境无该变量；测试断言 run 包装下子进程可见注入变量、
       配置文件与输出均无明文；支持包装 MCP server 启动命令（codex env 块场景）
-    evidence: ""
+    evidence: >
+      run-log 2026-11-22T01:25 条目：注入/父环境零明文/坏 spec 拒绝/printenv
+      测试 -count=2 稳定；真机冒烟 ref:bigmodel/primary 注入成功（输出仅
+      掩码 len/prefix）；stdio 直通+信号转发+退出码透传支持包装 MCP server；
+      全仓 10 包 ok
 
   - id: M4-5
     milestone: M4

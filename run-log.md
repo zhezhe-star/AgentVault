@@ -177,3 +177,9 @@
 - Apply 增 Options.ProxyAddr：proxy-attach 类改写时同步改 base_url——litellm yaml 的 api_key 行被替换后自动在其块内补/改 api_base: http://127.0.0.1:<port>/v1；JSON env（claude settings 形态）的 *_TOKEN 值替换为占位符后，同块 *_BASE_URL 兄弟键改写为 http://<addr>。
 - 集成测试：fixture 改写后 litellm 含 api_base 指向 127.0.0.1:8787/v1、claude settings ANTHROPIC_BASE_URL=127.0.0.1:8787、全部改写文件零明文；再起真实本地代理（随机回环端口 + mock 上游，key 从被改写的 ref 读取），以 OpenAI 客户端语义 POST /v1/chat/completions 完成 200 调用（上游校验注入的 Bearer 即被迁明文）。-count=2 稳定，全仓 10 包 ok，vet/gofmt 干净。
 - .zshrc export 行注释化 + agentvault 提示已在 M4-2 覆盖（含 agentvault run 恢复指引），本条测试复用同一 fixture。
+
+## [2026-11-22T01:25:00+08:00] evidence: M4-4 agentvault run 环境注入完成
+- cmd/agentvault/run.go：run --env VAR=ref:provider/key（可重复）-- <cmd>：进程内从钥匙链解密（service 命名空间复用配置），注入子进程 env；stdio 直通、信号转发、子进程退出码透传。
+- 注入语义：父进程环境被剔除同名变量后叠加注入值——父环境构造上不含明文；spec 格式错误或 ref 不存在直接拒绝（不启动子进程）。
+- 测试：子 env 含注入值且父环境零明文、坏 spec/缺失 ref 拒绝、printenv 子进程看到准确值。-count=2 稳定，全仓 10 包 ok，vet/gofmt 干净。
+- 真机冒烟：`agentvault run --env MY_GLM=ref:bigmodel/primary -- sh -c 'echo len/prefix'` → len=49 prefix=f693（钥匙链真实 key 经 run 注入成功，输出仅掩码）。
