@@ -172,3 +172,8 @@
 - **修复两处设计缺陷**（测试驱动）：同变量多文件引用冲突（.zshrc 与 codex 的 ARK_API_KEY 同名，后者覆盖前者）→ ref 按文件名去重（ark/ark_api_key vs ark/ark_api_key_config）；JSON env 块无行号锚点 → 按键名全文档精确替换而非行级改写。
 - 测试：预览只读快照断言、Apply 后三方验证（每个 ref 明文与原文件一致 / 每文件恰一个 .bak 且含原文 / 改写后文件零明文）、shell 行含恢复指引、toml/yaml 占位符、ref 去重。-count=3 稳定；全仓 10 包 ok，vet/gofmt 干净。
 - CLI：`agentvault import` 默认预览，--yes 才应用（改真实点文件仍需决策节点 3 逐项批准，本任务只落代码与 fixture 测试）。
+
+## [2026-11-22T01:05:00+08:00] evidence: M4-3 proxy-attach 接入改写完成
+- Apply 增 Options.ProxyAddr：proxy-attach 类改写时同步改 base_url——litellm yaml 的 api_key 行被替换后自动在其块内补/改 api_base: http://127.0.0.1:<port>/v1；JSON env（claude settings 形态）的 *_TOKEN 值替换为占位符后，同块 *_BASE_URL 兄弟键改写为 http://<addr>。
+- 集成测试：fixture 改写后 litellm 含 api_base 指向 127.0.0.1:8787/v1、claude settings ANTHROPIC_BASE_URL=127.0.0.1:8787、全部改写文件零明文；再起真实本地代理（随机回环端口 + mock 上游，key 从被改写的 ref 读取），以 OpenAI 客户端语义 POST /v1/chat/completions 完成 200 调用（上游校验注入的 Bearer 即被迁明文）。-count=2 稳定，全仓 10 包 ok，vet/gofmt 干净。
+- .zshrc export 行注释化 + agentvault 提示已在 M4-2 覆盖（含 agentvault run 恢复指引），本条测试复用同一 fixture。

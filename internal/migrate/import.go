@@ -128,7 +128,24 @@ type ImportReport struct {
 // back up and rewrite each affected file. Compliant findings are absent from
 // the plan by construction. Files are rewritten only after ALL secrets of
 // that file were stored, so a partial failure never loses a key.
+// Options tunes Apply's rewrites. Zero value rewrites values only.
+type Options struct {
+	// ProxyAddr (e.g. "127.0.0.1:8787") makes proxy-attach rewrites also
+	// point the client's base_url at the local proxy: litellm api_base gets
+	// set/added, JSON env *_BASE_URL siblings get rewritten to http://addr.
+	ProxyAddr string
+}
+
+// Apply is ApplyWithOptions with default options.
 func Apply(store secret.Store, service string, plan ImportPlan) (ImportReport, error) {
+	return ApplyWithOptions(store, service, plan, Options{})
+}
+
+// ApplyWithOptions executes a confirmed plan: store each secret in the vault
+// backend, back up and rewrite each affected file. Compliant findings are
+// absent from the plan by construction. Files are rewritten only after ALL
+// secrets of that file were stored, so a partial failure never loses a key.
+func ApplyWithOptions(store secret.Store, service string, plan ImportPlan, opts Options) (ImportReport, error) {
 	var rep ImportReport
 	// Phase 1: extract and store all secrets first.
 	secrets := map[string]string{} // ref -> plaintext
@@ -162,7 +179,7 @@ func Apply(store secret.Store, service string, plan ImportPlan) (ImportReport, e
 			}
 			seenFile[it.Finding.Path] = bak
 		}
-		if err := rewriteLine(it); err != nil {
+		if err := rewriteLine(it, opts); err != nil {
 			return rep, err
 		}
 	}
@@ -175,7 +192,7 @@ func Apply(store secret.Store, service string, plan ImportPlan) (ImportReport, e
 // rewriteLine replaces one occurrence in place: run-inject shell lines become
 // a comment naming the keychain ref and the agentvault run command; JSON/YAML/
 // TOML values become the placeholder string (structural validity preserved).
-func rewriteLine(it ImportItem) error {
+func rewriteLine(it ImportItem, opts Options) error {
 	data, err := os.ReadFile(it.Finding.Path)
 	if err != nil {
 		return err
@@ -185,6 +202,13 @@ func rewriteLine(it ImportItem) error {
 		// the whole document (env var names are unique within the block).
 		re := regexp.MustCompile(`("` + regexp.QuoteMeta(it.Finding.Var) + `"\s*:\s*")[^"]*(")`)
 		out := re.ReplaceAll(data, []byte("${1}"+Placeholder+"${2}"))
+		// proxy-attach: point the sibling *_BASE_URL at the proxy.
+		if opts.ProxyAddr != "" && it.Finding.Class == ClassProxyAttach {
+			if sibling, ok := baseURLOf(it.Finding.Var); ok {
+				re := regexp.MustCompile(`("` + regexp.QuoteMeta(sibling) + `"\s*:\s*")[^"]*(")`)
+				out = re.ReplaceAll(out, []byte("${1}http://"+opts.ProxyAddr+"${2}"))
+			}
+		}
 		return os.WriteFile(it.Finding.Path, out, 0o600)
 	}
 	lines := strings.Split(string(data), "\n")
@@ -196,12 +220,44 @@ func rewriteLine(it ImportItem) error {
 			it.Finding.Var, it.Ref, it.Finding.Var, it.Ref)
 	case "yaml-key":
 		lines[i] = replaceYAMLValue(lines[i], Placeholder)
+		if opts.ProxyAddr != "" && it.Finding.Class == ClassProxyAttach {
+			lines = ensureYAMLBase(lines, i, "http://"+opts.ProxyAddr+"/v1")
+		}
 	case "toml-env":
 		lines[i] = replaceTOMLValue(lines[i], Placeholder)
 	default:
 		return fmt.Errorf("migrate: unsupported kind %s", it.Finding.Kind)
 	}
 	return os.WriteFile(it.Finding.Path, []byte(strings.Join(lines, "\n")), 0o600)
+}
+
+// baseURLOf maps a credential var to its client's base_url var: the
+// ANTHROPIC_AUTH_TOKEN -> ANTHROPIC_BASE_URL convention.
+func baseURLOf(varName string) (string, bool) {
+	if strings.HasSuffix(varName, "_TOKEN") {
+		return strings.TrimSuffix(varName, "_TOKEN") + "_BASE_URL", true
+	}
+	return "", false
+}
+
+// ensureYAMLBase sets or inserts an api_base line for the api_key at idx,
+// keeping the same block (replacing an existing api_base nearby, else
+// inserting right after the api_key line with matching indent).
+func ensureYAMLBase(lines []string, idx int, base string) []string {
+	indent := lines[idx][:len(lines[idx])-len(strings.TrimLeft(lines[idx], " "))] + "  "
+	end := idx + 1
+	for end < len(lines) {
+		l := lines[end]
+		if strings.TrimSpace(l) != "" && !strings.HasPrefix(l, " ") {
+			break // dedented: left the block
+		}
+		if strings.Contains(l, "api_base:") {
+			lines[end] = indent + "api_base: " + base
+			return lines
+		}
+		end++
+	}
+	return append(lines[:idx+1], append([]string{indent + "api_base: " + base}, lines[idx+1:]...)...)
 }
 
 // replaceJSONValue swaps the value of "VAR": "old" in a single JSON line.

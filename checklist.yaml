@@ -195,7 +195,11 @@ tasks:
       测试断言：改写后 .zshrc 中 export 行被注释并附 agentvault 提示、
       litellm/claude settings 等支持 base_url 的配置指向 http://127.0.0.1:<port>；
       改写后环境无明文 key，代理可用该客户端语义完成一次 mock 调用
-    evidence: ""
+    evidence: >
+      run-log 2026-11-22T01:05 条目：litellm api_base / claude settings
+      ANTHROPIC_BASE_URL 改写指向 127.0.0.1:8787；改写文件零明文；真实代理
+      + mock 上游完成一次 OpenAI 语义 200 调用（上游校验注入的迁移 key）；
+      全部 -count=2 稳定，全仓 10 包 ok
 
   - id: M4-4
     milestone: M4
