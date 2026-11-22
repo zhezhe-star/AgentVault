@@ -165,3 +165,10 @@
 - 输出构造上无完整明文：Mask 仅前 4+后 4+长度；占位符（agentvault-local-placeholder/sk-xxx）与变量引用（${...}）不报——后者是真机首跑发现的误报（.zshrc 第 9 行已是引用），补过滤并加回归用例。
 - 测试：fixture HOME 全四文件、掩码不泄漏、占位符/非凭据变量不报、默认分类与覆盖、空 home、Mask 单测。全仓 10 包 ok。
 - 真机只读扫描：11 处明文——.zshrc ARK_API_KEY（ark-…fc2a）、litellm config 3 处 api_key（其中 GLM 两处同值 f693…hXcM 即已迁钥匙链的 bigmodel key、另 deepseek sk-d…a22f）、.codex config.toml 7 处（ark ×3、GLM f693…hXcM ×3、Z_AI f693…hXcM 同值、deepseek sk-9…0119）；~/.claude/settings.json 零命中（M2-7 迁移保持有效）。
+
+## [2026-11-22T00:40:00+08:00] evidence: M4-2 import 导入命令完成
+- internal/migrate/import.go：BuildPlan（跳过 compliant，ref=provider/keyID）→ Preview（掩码，只读）→ Apply（两阶段：先全部入 SecretStore，后逐文件 .bak-时间戳 备份 + 改写——存储全成功才动文件，部分失败零丢失）。
+- 改写策略：shell export 行明文彻底移除，替换为注释（含 ref 与 `agentvault run --env VAR=ref:... -- cmd` 恢复指引）；JSON/YAML/TOML 值替换为 agentvault-local-placeholder（保持结构合法）。
+- **修复两处设计缺陷**（测试驱动）：同变量多文件引用冲突（.zshrc 与 codex 的 ARK_API_KEY 同名，后者覆盖前者）→ ref 按文件名去重（ark/ark_api_key vs ark/ark_api_key_config）；JSON env 块无行号锚点 → 按键名全文档精确替换而非行级改写。
+- 测试：预览只读快照断言、Apply 后三方验证（每个 ref 明文与原文件一致 / 每文件恰一个 .bak 且含原文 / 改写后文件零明文）、shell 行含恢复指引、toml/yaml 占位符、ref 去重。-count=3 稳定；全仓 10 包 ok，vet/gofmt 干净。
+- CLI：`agentvault import` 默认预览，--yes 才应用（改真实点文件仍需决策节点 3 逐项批准，本任务只落代码与 fixture 测试）。

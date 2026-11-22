@@ -182,7 +182,10 @@ tasks:
       集成测试：import 预览模式只读不改文件；确认后 key 进 SecretStore、
       原文件按分类改写（proxy-attach 类换 base_url、run-inject 类注释化/移除明文行）、
       生成 .bak 且与原文件 diff 可验证；拒绝时零改动
-    evidence: ""
+    evidence: >
+      run-log 2026-11-22T00:40 条目：预览只读断言、Apply 两阶段（先存储后改写）、
+      每文件恰一 .bak 且含原文、改写后零明文、ref 多文件去重、CLI 默认预览
+      --yes 才应用；fixture 测试 -count=3 稳定，全仓 10 包 ok
 
   - id: M4-3
     milestone: M4

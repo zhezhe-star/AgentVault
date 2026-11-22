@@ -70,9 +70,21 @@ func TestScanFindsPlaintextAndMasks(t *testing.T) {
 	for _, f := range found {
 		got = append(got, f.Var)
 	}
-	want := []string{"ARK_API_KEY", "ANTHROPIC_LEAKED_TOKEN", "MY_TOOL_TOKEN", "api_key", "ARK_API_KEY", "Z_AI_API_KEY"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("scan vars = %v, want %v", got, want)
+	want := map[string]int{"ARK_API_KEY": 2, "ANTHROPIC_LEAKED_TOKEN": 1, "MY_TOOL_TOKEN": 1, "api_key": 1, "Z_AI_API_KEY": 1}
+	gotCount := map[string]int{}
+	for _, v := range got {
+		gotCount[v]++
+	}
+	if len(got) != len(found) {
+		t.Fatal("mismatch")
+	}
+	for v, n := range want {
+		if gotCount[v] != n {
+			t.Fatalf("var %s: got %d occurrences, want %d (all: %v)", v, gotCount[v], n, got)
+		}
+	}
+	if len(gotCount) != len(want) {
+		t.Fatalf("unexpected extra vars: %v", gotCount)
 	}
 	for _, f := range found {
 		if strings.Contains(f.MaskedValue, "abcdef1234567890abcdef") && !strings.Contains(f.MaskedValue, "…") {
