@@ -223,7 +223,10 @@ tasks:
       agentvault import --report 输出三分类迁移状态汇总，run-inject 类附
       专用 key 录入与 wrapper 配置示例指引；报告不含明文 key；真机（用户本机）
       试运行记录进 run-log（改写用户点文件前属决策节点 3，需人批准）
-    evidence: ""
+    evidence: >
+      run-log 2026-11-22T01:40 条目：报告三分类 + 指引四步，零明文断言；
+      真机只读试运行 11 处（proxy-attach 3 / run-inject 8 / compliant 0）；
+      真实点文件改写待用户批准（决策节点 3）；全仓 10 包 ok
 
   - id: M3-6
     milestone: M3

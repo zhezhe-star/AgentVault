@@ -19,6 +19,7 @@ func registerImportCommands(root *cobra.Command, out io.Writer) {
 func importCmd(out io.Writer) *cobra.Command {
 	var home string
 	var yes bool
+	var report bool
 	cmd := &cobra.Command{
 		Use:   "import",
 		Short: "Import scanned plaintext keys into the vault and rewrite the files (.bak backups)",
@@ -35,6 +36,22 @@ compliant entries are never touched.`,
 			found, err := migrate.NewScanner(home).Scan()
 			if err != nil {
 				return err
+			}
+			if report {
+				var refs []string
+				if yes {
+					cfg, err := app.Resolve()
+					if err != nil {
+						return err
+					}
+					rep, err := migrate.Apply(cfg.Secret, cfg.Service, migrate.BuildPlan(found))
+					if err != nil {
+						return err
+					}
+					refs = rep.Imported
+				}
+				migrate.WriteReport(out, found, refs)
+				return nil
 			}
 			plan := migrate.BuildPlan(found)
 			plan.Preview(out)
@@ -61,5 +78,6 @@ compliant entries are never touched.`,
 	}
 	cmd.Flags().StringVar(&home, "home", "", "home directory to operate on (default: current user home)")
 	cmd.Flags().BoolVar(&yes, "yes", false, "apply the plan (default: preview only)")
+	cmd.Flags().BoolVar(&report, "report", false, "print the three-class migration report instead of the plan")
 	return cmd
 }

@@ -183,3 +183,10 @@
 - 注入语义：父进程环境被剔除同名变量后叠加注入值——父环境构造上不含明文；spec 格式错误或 ref 不存在直接拒绝（不启动子进程）。
 - 测试：子 env 含注入值且父环境零明文、坏 spec/缺失 ref 拒绝、printenv 子进程看到准确值。-count=2 稳定，全仓 10 包 ok，vet/gofmt 干净。
 - 真机冒烟：`agentvault run --env MY_GLM=ref:bigmodel/primary -- sh -c 'echo len/prefix'` → len=49 prefix=f693（钥匙链真实 key 经 run 注入成功，输出仅掩码）。
+
+## [2026-11-22T01:40:00+08:00] evidence: M4-5 迁移报告完成 — M4 代码全部就绪
+- migrate.WriteReport：三分类汇总（每类逐处列出 文件:行 变量 掩码值）+ 已入钥匙链 ref 清单 + run-inject 类指引（一工具一专用 key 录入 / agentvault run wrapper / codex env 块改写示例 / 吊销演练四步）。输入是 Finding（构造上仅掩码），报告不可能含明文。
+- CLI：agentvault import --report 输出报告（--report 与 --yes 可叠加：先应用再报告）。
+- 测试：三分类段落、零明文断言、指引与 ref 清单存在。全仓 10 包 ok，vet/gofmt 干净。
+- 真机试运行（只读）：报告输出 11 处——proxy-attach 3（litellm：GLM key ×2 已在钥匙链、deepseek ×1）、run-inject 8（.zshrc ARK ×1、codex toml ×7）、compliant 0；报告无明文。
+- **待决策**：改写真实点文件（~/.zshrc、~/.config/litellm/config.yaml、~/.codex/config.toml）属决策节点 3，需用户逐项批准后方可 import --yes；批准后重跑 scan 应 0 命中即 M4 清零复核。
