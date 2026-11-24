@@ -73,8 +73,10 @@ func TestMessagesPassthrough(t *testing.T) {
 	if gotVersion != "2023-06-01" {
 		t.Fatalf("anthropic-version not passed through: %q", gotVersion)
 	}
-	if !strings.Contains(string(gotBody), `"anthro-model"`) {
-		t.Fatalf("body not forwarded: %s", gotBody)
+	// The alias is rewritten to the registered upstream model id before
+	// forwarding; every other field passes through untouched.
+	if !strings.Contains(string(gotBody), `"glm-4.7"`) || strings.Contains(string(gotBody), `"anthro-model"`) {
+		t.Fatalf("body model not rewritten: %s", gotBody)
 	}
 	// Response body passes through untouched (Anthropic message shape).
 	buf := make([]byte, 4096)

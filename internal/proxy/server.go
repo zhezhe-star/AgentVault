@@ -195,6 +195,21 @@ type chatRequest struct {
 	Stream bool   `json:"stream"`
 }
 
+// rewriteModelField replaces the "model" member of a JSON request body,
+// preserving every other field (including ones chatRequest doesn't model).
+func rewriteModelField(body []byte, model string) ([]byte, error) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(model)
+	if err != nil {
+		return nil, err
+	}
+	obj["model"] = raw
+	return json.Marshal(obj)
+}
+
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	s.forward(w, r, wireOpenAI)
 }
@@ -249,6 +264,15 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, wireFlavor wire
 	if err := json.Unmarshal(body, &req); err != nil || req.Model == "" {
 		writeError(w, http.StatusBadRequest, `body must be JSON with a "model" field`)
 		return
+	}
+
+	// Providers only know their own model ids: rewrite the body's model
+	// field to the registered upstream id before forwarding so alias rows
+	// in the models table actually re-map requests (no-op for 1:1 names).
+	if mapped := s.router.upstreamName(req.Model); mapped != "" && mapped != req.Model {
+		if nb, err := rewriteModelField(body, mapped); err == nil {
+			body = nb
+		}
 	}
 
 	// Try candidates in order: on 429/5xx cool the key down and fail over

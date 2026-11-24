@@ -101,6 +101,45 @@ func TestChatCompletionsForwarding(t *testing.T) {
 	}
 }
 
+func TestModelAliasRewrite(t *testing.T) {
+	var gotBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = bufReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"chatcmpl-1","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"hi"}}]}`)
+	}))
+	defer upstream.Close()
+
+	store, sec, svc := fixture(t, upstream.URL)
+	// An alias row: clients ask for "alias-a", the provider only knows "test-model".
+	if err := store.CreateModel(provider.Model{ID: "m2", ProviderID: "mockprov", KeyID: "k1", Name: "alias-a", Upstream: "test-model"}); err != nil {
+		t.Fatalf("CreateModel alias: %v", err)
+	}
+	srv := New(store, sec, svc)
+	base := startProxy(t, srv)
+
+	resp, err := http.Post(base+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"alias-a","messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(gotBody, &body); err != nil {
+		t.Fatalf("upstream body: %v", err)
+	}
+	if body["model"] != "test-model" {
+		t.Fatalf("upstream model = %v, want rewritten %q", body["model"], "test-model")
+	}
+	if _, ok := body["messages"]; !ok {
+		t.Fatalf("non-model fields lost during rewrite: %s", gotBody)
+	}
+}
+
 func TestLoopbackOnly(t *testing.T) {
 	store, sec, svc := fixture(t, "http://127.0.0.1:1")
 	srv := New(store, sec, svc)

@@ -97,6 +97,23 @@ func (r *router) candidates(model string) ([]candidate, error) {
 	return out, nil
 }
 
+// upstreamName resolves the provider-side model id registered for a
+// requested alias ("claude-opus-4-5" -> "glm-5.4"). It returns "" when the
+// name is unknown or has no upstream mapping, so callers treat a non-empty,
+// differing result as "rewrite the request body".
+func (r *router) upstreamName(model string) string {
+	models, err := r.store.ListAllModels()
+	if err != nil {
+		return ""
+	}
+	for _, m := range models {
+		if m.Name == model && m.Upstream != "" {
+			return m.Upstream
+		}
+	}
+	return ""
+}
+
 // pick returns the next healthy candidate for the model, or false when all
 // are cooling down (or none exist).
 func (r *router) pick(model string) (candidate, bool) {
