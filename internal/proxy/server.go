@@ -88,6 +88,7 @@ func New(store *provider.Store, sec secret.Store, service string) *Server {
 		logger: func(_ RequestLog) {},
 	}
 	s.mux.HandleFunc("/v1/chat/completions", s.handleChat)
+	s.mux.HandleFunc("/v1/responses", s.handleResponses)
 	s.mux.HandleFunc("/v1/messages", s.handleMessages)
 	s.mux.HandleFunc("/v1/models", s.handleModels)
 	s.mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
