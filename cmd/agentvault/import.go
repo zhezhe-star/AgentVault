@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -20,6 +21,7 @@ func importCmd(out io.Writer) *cobra.Command {
 	var home string
 	var yes bool
 	var report bool
+	var only []string
 	cmd := &cobra.Command{
 		Use:   "import",
 		Short: "Import scanned plaintext keys into the vault and rewrite the files (.bak backups)",
@@ -44,7 +46,7 @@ compliant entries are never touched.`,
 					if err != nil {
 						return err
 					}
-					rep, err := migrate.Apply(cfg.Secret, cfg.Service, migrate.BuildPlan(found))
+					rep, err := migrate.Apply(cfg.Secret, cfg.Service, migrate.BuildPlanFiltered(found, resolveOnly(home, only)))
 					if err != nil {
 						return err
 					}
@@ -53,7 +55,7 @@ compliant entries are never touched.`,
 				migrate.WriteReport(out, found, refs)
 				return nil
 			}
-			plan := migrate.BuildPlan(found)
+			plan := migrate.BuildPlanFiltered(found, resolveOnly(home, only))
 			plan.Preview(out)
 			if !yes {
 				fmt.Fprintln(out, "\npreview only — rerun with --yes to apply")
@@ -79,5 +81,22 @@ compliant entries are never touched.`,
 	cmd.Flags().StringVar(&home, "home", "", "home directory to operate on (default: current user home)")
 	cmd.Flags().BoolVar(&yes, "yes", false, "apply the plan (default: preview only)")
 	cmd.Flags().BoolVar(&report, "report", false, "print the three-class migration report instead of the plan")
+	cmd.Flags().StringArrayVar(&only, "only", nil, "restrict the plan to this file (repeatable; default: all found files)")
 	return cmd
+}
+
+// resolveOnly turns --only args into absolute paths (relative resolved
+// against the scanned home).
+func resolveOnly(home string, only []string) []string {
+	var out []string
+	for _, o := range only {
+		if !filepath.IsAbs(o) {
+			o = filepath.Join(home, o)
+		}
+		if abs, err := filepath.Abs(o); err == nil {
+			o = abs
+		}
+		out = append(out, o)
+	}
+	return out
 }

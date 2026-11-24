@@ -32,10 +32,23 @@ type ImportPlan struct {
 // BuildPlan turns findings into a plan, skipping compliant entries (never
 // touched) and assigning keychain refs provider/keyID.
 func BuildPlan(found []Finding) ImportPlan {
+	return BuildPlanFiltered(found, nil)
+}
+
+// BuildPlanFiltered additionally restricts the plan to the given absolute
+// paths (nil/empty = all files) — the per-file approval gate.
+func BuildPlanFiltered(found []Finding, only []string) ImportPlan {
+	allowed := map[string]bool{}
+	for _, p := range only {
+		allowed[p] = true
+	}
 	plan := ImportPlan{}
 	seen := map[string]bool{}
 	for _, f := range found {
 		if f.Class == ClassCompliant {
+			continue
+		}
+		if len(allowed) > 0 && !allowed[f.Path] {
 			continue
 		}
 		provider := f.Provider

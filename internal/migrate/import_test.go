@@ -155,3 +155,29 @@ func TestImportRefuseLeavesZeroChanges(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildPlanFilteredPerFile(t *testing.T) {
+	home := fixtureHome(t)
+	found, _ := NewScanner(home).Scan()
+	zshrc := filepath.Join(home, ".zshrc")
+	plan := BuildPlanFiltered(found, []string{zshrc})
+	if len(plan.Items) != 1 || plan.Items[0].Finding.Path != zshrc {
+		t.Fatalf("filtered plan should only touch .zshrc, got %d items", len(plan.Items))
+	}
+	// Applying it must not modify any other file.
+	store := secret.NewMemoryStore()
+	rep, err := Apply(store, "agentvault", plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Files) != 1 || rep.Files[0] != zshrc {
+		t.Fatalf("rewrote %v, want only %s", rep.Files, zshrc)
+	}
+	toml, _ := os.ReadFile(filepath.Join(home, ".codex/config.toml"))
+	for _, s := range secretExpr() {
+		if strings.Contains(string(toml), s) {
+			return // untouched file still has its plaintext: correct
+		}
+	}
+	t.Fatal("untouched file lost its plaintext?!")
+}
