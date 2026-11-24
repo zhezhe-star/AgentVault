@@ -570,8 +570,17 @@ func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, req *r
 	for {
 		route, ok := s.router.pick(req.Model)
 		if !ok {
-			if attempted == 0 {
+			if attempted == 0 && !s.router.known(req.Model) {
 				writeError(w, http.StatusNotFound, "no active key serves model "+req.Model)
+			} else if attempted == 0 {
+				// Every key is cooling down: 429 so clients retry, and
+				// record it so throttling is visible.
+				writeCooldown429(w, req.Model, s.router.retryAfter())
+				s.recordUsage(usage.Record{
+					Model:    req.Model,
+					Protocol: protocol, Status: http.StatusTooManyRequests,
+					LatencyMS: time.Since(start).Milliseconds(),
+				})
 			} else {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(lastStatus)
@@ -627,7 +636,7 @@ func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, req *r
 			resp.Body.Close()
 			lastStatus, lastBody = resp.StatusCode, respBody
 			lastRoute = route
-			s.router.fail(route)
+			s.failUpstream(route, resp, respBody)
 			s.keys.invalidate(route.providerID, route.keyID)
 			attempted++
 			continue

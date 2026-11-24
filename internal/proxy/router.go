@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"math"
 	"sort"
 	"sync"
 	"time"
@@ -11,6 +12,12 @@ import (
 // DefaultCooldown is how long a rate-limited key sits out before rejoining
 // the rotation.
 const DefaultCooldown = 60 * time.Second
+
+// DefaultShortCooldown is the brief sit-out used when an upstream 429 looks
+// like concurrency throttling (no Retry-After, no quota wording): the key
+// typically frees up within seconds, so a full DefaultCooldown would
+// needlessly starve single-key setups.
+const DefaultShortCooldown = 2 * time.Second
 
 // BreakerThreshold is the number of consecutive failures that trips the
 // circuit breaker for a key.
@@ -97,6 +104,15 @@ func (r *router) candidates(model string) ([]candidate, error) {
 	return out, nil
 }
 
+// known reports whether any active key serves the model at all. pick
+// returns false both for an unknown model and for an all-cooling model;
+// callers use known to tell "no such model" (404) apart from "every key
+// is cooling down" (429).
+func (r *router) known(model string) bool {
+	cands, err := r.candidates(model)
+	return err == nil && len(cands) > 0
+}
+
 // upstreamName resolves the provider-side model id registered for a
 // requested alias ("claude-opus-4-5" -> "glm-5.4"). It returns "" when the
 // name is unknown or has no upstream mapping, so callers treat a non-empty,
@@ -151,12 +167,32 @@ func (r *router) pick(model string) (candidate, bool) {
 	return healthy[idx], true
 }
 
+// failOption customizes a fail() cooldown without changing failure
+// accounting.
+type failOption func(*failOpts)
+
+type failOpts struct {
+	cooldown time.Duration
+}
+
+// withCooldown overrides the sit-out duration (e.g. a short cooldown for
+// concurrency-throttle 429s, or the upstream's own Retry-After value).
+func withCooldown(d time.Duration) failOption {
+	return func(o *failOpts) { o.cooldown = d }
+}
+
 // fail puts a key into cooldown (429 or upstream 5xx). Consecutive
 // failures at BreakerThreshold trip the breaker: the key sits out for
 // BreakerOpenDuration instead, and its next pick is the half-open probe.
-func (r *router) fail(c candidate) {
+// Short cooldowns still count toward the breaker, so sustained rate
+// limiting escalates to the long cooldown/open breaker as before.
+func (r *router) fail(c candidate, opts ...failOption) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	var o failOpts
+	for _, f := range opts {
+		f(&o)
+	}
 	id := c.providerID + "/" + c.keyID
 	r.fails[id]++
 	if r.fails[id] >= BreakerThreshold {
@@ -164,7 +200,11 @@ func (r *router) fail(c candidate) {
 		r.breaker[id] = true
 		return
 	}
-	r.cooldowns[id] = time.Now().Add(r.cooldown)
+	d := r.cooldown
+	if o.cooldown > 0 {
+		d = o.cooldown
+	}
+	r.cooldowns[id] = time.Now().Add(d)
 }
 
 // success clears any failure state for the key (a successful half-open
@@ -183,6 +223,34 @@ func (r *router) breakerCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.breaker)
+}
+
+// retryAfter returns how long until the soonest cooling key rejoins the
+// rotation, rounded up to whole seconds (minimum 1). It returns 0 when
+// nothing is cooling, so callers only set Retry-After on a genuine
+// all-keys-cooling 429.
+func (r *router) retryAfter() time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now()
+	var min time.Duration
+	for _, until := range r.cooldowns {
+		d := until.Sub(now)
+		if d <= 0 {
+			continue
+		}
+		if min == 0 || d < min {
+			min = d
+		}
+	}
+	if min == 0 {
+		return 0
+	}
+	secs := int64(math.Ceil(min.Seconds()))
+	if secs < 1 {
+		secs = 1
+	}
+	return time.Duration(secs) * time.Second
 }
 
 // coolingCount reports how many keys are currently cooling down (for

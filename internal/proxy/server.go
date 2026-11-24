@@ -13,6 +13,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -285,8 +286,18 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, wireFlavor wire
 	for {
 		route, ok := s.router.pick(req.Model)
 		if !ok {
-			if attempted == 0 {
+			if attempted == 0 && !s.router.known(req.Model) {
 				writeError(w, http.StatusNotFound, "no active key serves model "+req.Model)
+			} else if attempted == 0 {
+				// Every key is cooling down: this is "temporarily
+				// unavailable", not "model missing" — 429 so clients
+				// retry, and record it so throttling is visible.
+				writeCooldown429(w, req.Model, s.router.retryAfter())
+				s.recordUsage(usage.Record{
+					Model:    req.Model,
+					Protocol: protocol, Status: http.StatusTooManyRequests,
+					LatencyMS: time.Since(start).Milliseconds(),
+				})
 			} else {
 				// All remaining candidates exhausted; relay the last
 				// upstream failure so clients can react (429 semantics).
@@ -364,7 +375,7 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, wireFlavor wire
 			resp.Body.Close()
 			lastStatus, lastBody = resp.StatusCode, respBody
 			lastRoute = route
-			s.router.fail(route)
+			s.failUpstream(route, resp, respBody)
 			s.keys.invalidate(route.providerID, route.keyID)
 			attempted++
 			continue
@@ -488,6 +499,62 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"error": map[string]string{"message": msg, "type": "agentvault_error"},
 	})
+}
+
+// quotaMarkers are body substrings that indicate a 429 is about quota /
+// balance exhaustion rather than momentary concurrency throttling. Quota
+// failures do not clear up in seconds, so they take the long cooldown.
+var quotaMarkers = []string{
+	"quota", "insufficient", "balance", "arrears", "欠费", "余额", "额度",
+}
+
+// rateLimitCooldown classifies an upstream 429 and returns the cooldown to
+// apply. It honors the upstream's own Retry-After (delta-seconds or
+// HTTP-date) when present; otherwise a body that looks quota-related gets
+// the default (long) cooldown — signaled by returning 0 — and everything
+// else is treated as short-lived concurrency throttling.
+func rateLimitCooldown(resp *http.Response, body []byte) time.Duration {
+	if ra := resp.Header.Get("Retry-After"); ra != "" {
+		if secs, err := strconv.Atoi(strings.TrimSpace(ra)); err == nil && secs >= 0 {
+			return time.Duration(secs) * time.Second
+		}
+		if t, err := http.ParseTime(ra); err == nil {
+			if d := time.Until(t); d > 0 {
+				return d
+			}
+		}
+	}
+	lower := strings.ToLower(string(body))
+	for _, m := range quotaMarkers {
+		if strings.Contains(lower, m) {
+			return 0
+		}
+	}
+	return DefaultShortCooldown
+}
+
+// failUpstream cools the route down according to the upstream failure:
+// 429s are classified by rateLimitCooldown, everything else (5xx, network
+// errors) takes the default long cooldown.
+func (s *Server) failUpstream(route candidate, resp *http.Response, body []byte) {
+	if resp != nil && resp.StatusCode == http.StatusTooManyRequests {
+		if d := rateLimitCooldown(resp, body); d > 0 {
+			s.router.fail(route, withCooldown(d))
+			return
+		}
+	}
+	s.router.fail(route)
+}
+
+// writeCooldown429 answers a request whose every candidate key is cooling
+// down: 429 (not 404 — the model exists, it is momentarily unavailable)
+// with a Retry-After naming the soonest expected recovery.
+func writeCooldown429(w http.ResponseWriter, model string, retryAfter time.Duration) {
+	if retryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
+	}
+	writeError(w, http.StatusTooManyRequests,
+		"all keys serving model "+model+" are cooling down (rate limited upstream); retry later")
 }
 
 // writeQuotaError emits a structured 429 naming the quota that tripped.
