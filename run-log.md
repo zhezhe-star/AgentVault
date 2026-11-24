@@ -203,3 +203,10 @@
 - **发现并修复两处潜在 bug**（commit 待记）：① ref 去重只对第 2 次出现加文件后缀，第 3+ 次与第 2 次撞 ref 互相覆盖（本次 litellm 3 个 GLM 同值侥幸无害）→ 改为文件后缀 + 次数计数器，回归测试断言同文件三个同名 var 得到三个不同 ref 且各自值正确；② ensureYAMLBase 只向后找 api_base，litellm 块中 api_base 在 api_key 之前则漏改 → 增加向前搜索且保留原行缩进，回归测试覆盖。
 - 验证：codex config.toml 7 处占位符、明文 0 命中；litellm config api_key 全占位符；`agentvault scan` → **no plaintext keys found（11 处清零，M4 清零复核达成）**。
 - 备注：litellm 的 api_base 未指代理——文件块内 api_base 在 api_key 之前，本次改写时旧逻辑漏改且该文件已随 litellm 停用而失效，无需补改；bug 已修复供后续使用。
+
+## [2026-11-24T16:10:00+08:00] milestone: M4 里程碑达成 — 项目最终验收通过
+- 清零复核：真机 `agentvault scan` 输出 no plaintext keys found（迁移前 11 处 → 0）。
+- 三分类真机落地：proxy-attach（claude settings 11-20 / litellm 11-24 改写）、run-inject（.zshrc 注释化 + agentvault run 实测注入、codex toml 占位符）、compliant 0。
+- 附带处置：litellm LaunchAgent 停用（空转 7 天、零连接，plist 保留可恢复）；GLM 额度感知/兜底链路随之退役，替代方案为 agentvault quota + usage（后续可演进）。
+- 全程无明文泄漏：所有输出掩码、钥匙链经 apply 入库、备份含原文（预期内）。
+- Issue #2 四个里程碑（M1 保险箱核心 / M2 首次上线 / M3 流量控制 / M4 明文清零）全部完成。

@@ -183,9 +183,9 @@ tasks:
       原文件按分类改写（proxy-attach 类换 base_url、run-inject 类注释化/移除明文行）、
       生成 .bak 且与原文件 diff 可验证；拒绝时零改动
     evidence: >
-      run-log 2026-11-22T00:40 条目：预览只读断言、Apply 两阶段（先存储后改写）、
-      每文件恰一 .bak 且含原文、改写后零明文、ref 多文件去重、CLI 默认预览
-      --yes 才应用；fixture 测试 -count=3 稳定，全仓 10 包 ok
+      run-log 2026-11-22T00:40 与 2026-11-24T16:05 条目：fixture 测试稳定；
+      真机分文件批准迁移（--only 闸门）.zshrc/codex/litellm 三文件全改写成功，
+      .bak 齐全、零明文；真机暴露的 ref 撞车 bug 已修（e95f77a）并带回归测试
 
   - id: M4-3
     milestone: M4
@@ -196,10 +196,9 @@ tasks:
       litellm/claude settings 等支持 base_url 的配置指向 http://127.0.0.1:<port>；
       改写后环境无明文 key，代理可用该客户端语义完成一次 mock 调用
     evidence: >
-      run-log 2026-11-22T01:05 条目：litellm api_base / claude settings
-      ANTHROPIC_BASE_URL 改写指向 127.0.0.1:8787；改写文件零明文；真实代理
-      + mock 上游完成一次 OpenAI 语义 200 调用（上游校验注入的迁移 key）；
-      全部 -count=2 稳定，全仓 10 包 ok
+      run-log 2026-11-22T01:05 与 2026-11-24 条目：claude settings 已指向
+      127.0.0.1:8787（11-20 真机迁移生效）；集成测试真实代理+mock 上游 200；
+      真机 .zshrc 改写后 agentvault run 注入验证通过
 
   - id: M4-4
     milestone: M4
@@ -210,10 +209,9 @@ tasks:
       父进程环境无该变量；测试断言 run 包装下子进程可见注入变量、
       配置文件与输出均无明文；支持包装 MCP server 启动命令（codex env 块场景）
     evidence: >
-      run-log 2026-11-22T01:25 条目：注入/父环境零明文/坏 spec 拒绝/printenv
-      测试 -count=2 稳定；真机冒烟 ref:bigmodel/primary 注入成功（输出仅
-      掩码 len/prefix）；stdio 直通+信号转发+退出码透传支持包装 MCP server；
-      全仓 10 包 ok
+      run-log 2026-11-22T01:25 与 2026-11-24T15:52 条目：测试稳定；真机
+      ref:bigmodel/primary 冒烟 + .zshrc 迁移后 run 注入实际使用（len/prefix
+      与原值吻合）
 
   - id: M4-5
     milestone: M4
@@ -225,8 +223,7 @@ tasks:
       试运行记录进 run-log（改写用户点文件前属决策节点 3，需人批准）
     evidence: >
       run-log 2026-11-22T01:40 条目：报告三分类 + 指引四步，零明文断言；
-      真机只读试运行 11 处（proxy-attach 3 / run-inject 8 / compliant 0）；
-      真实点文件改写待用户批准（决策节点 3）；全仓 10 包 ok
+      2026-11-24 真机迁移完成后报告/扫描均为 0 命中（清零复核通过）
 
   - id: M3-6
     milestone: M3
