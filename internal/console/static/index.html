@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentVault 控制台</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, "Segoe UI", sans-serif; margin: 2rem auto; max-width: 880px; padding: 0 1rem; line-height: 1.5; }
+  h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
+  .provider { border: 1px solid #8884; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+  .key { margin: 0.5rem 0 0.5rem 1rem; }
+  .status-active { color: #1a7f37; } .status-revoked, .status-disabled { color: #cf222e; }
+  .ref { font-family: ui-monospace, monospace; font-size: 0.85em; opacity: 0.8; }
+  table { border-collapse: collapse; margin-left: 2rem; }
+  th, td { border: 1px solid #8884; padding: 0.25rem 0.75rem; text-align: left; font-size: 0.9em; }
+  .empty { opacity: 0.6; font-style: italic; }
+</style>
+</head>
+<body>
+<h1>AgentVault 控制台</h1>
+<p>Provider → Key → 模型 三级视图（数据来自本地库，token 用量自 M3 起累计）</p>
+<div id="overview"><span class="empty">加载中…</span></div>
+<script>
+async function load() {
+  const el = document.getElementById('overview');
+  try {
+    const res = await fetch('/console/api/overview');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    if (!data.providers || data.providers.length === 0) {
+      el.innerHTML = '<span class="empty">尚未注册任何 provider（agentvault provider add …）</span>';
+      return;
+    }
+    el.innerHTML = data.providers.map(p => `
+      <div class="provider">
+        <h2>${p.name} <small>(${p.id})</small></h2>
+        <div class="ref">${p.base_url}</div>
+        ${p.keys.length === 0 ? '<span class="empty">无 key</span>' : p.keys.map(k => `
+          <div class="key">
+            key <strong>${k.id}</strong> <span class="status-${k.status}">${k.status}</span>
+            <span class="ref">${k.ref}</span>
+            ${k.models.length === 0 ? '<div class="empty">无模型</div>' : `
+            <table>
+              <tr><th>模型</th><th>上游 ID</th><th>Tokens In</th><th>Tokens Out</th></tr>
+              ${k.models.map(m => `
+              <tr><td>${m.name}</td><td>${m.upstream}</td>
+                  <td>${m.tokens_in}</td><td>${m.tokens_out}</td></tr>`).join('')}
+            </table>`}
+          </div>`).join('')}
+      </div>`).join('');
+  } catch (e) {
+    el.innerHTML = '<span class="status-revoked">加载失败：' + e.message + '</span>';
+  }
+}
+load();
+</script>
+</body>
+</html>

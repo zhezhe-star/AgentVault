@@ -1,0 +1,251 @@
+# checklist.yaml — Issue #2 流量控制后台任务清单
+# 只追加不改删；状态流转 pending → in_progress → complete/failed/archived
+# 标 complete 前必须填 evidence（指向 run-log.md 条目）
+
+tasks:
+  # ── M1: Provider 核心与加密存储 ──────────────────────────
+  - id: M1-1
+    milestone: M1
+    title: 仓库脚手架（go module、目录结构、cobra CLI 骨架、CI workflow、Makefile）
+    status: complete
+    acceptance: >
+      go build ./... 成功；agentvault --help 显示子命令骨架；.github/workflows/ci.yml
+      存在且含 go test + go vet + gofmt 检查；make test 可运行
+    evidence: "[2026-11-18T00:05:00+08:00] build/vet/gofmt 全绿，--help 正常，run-log M1-1 条目"
+
+  - id: M1-2
+    milestone: M1
+    title: Provider 实体模型与 SQLite schema（迁移机制，表 providers/keys）
+    status: complete
+    acceptance: >
+      go test ./internal/provider 通过：建库迁移成功、provider 增删查、
+      key 状态流转（active/disabled/revoked）正确；migration 版本表存在且可重复执行幂等
+    evidence: "[2026-11-18T00:15:00+08:00] go test ./internal/provider ok；迁移幂等/状态流转/UNIQUE 测试全过，见 run-log M1-2"
+
+  - id: M1-3
+    milestone: M1
+    title: SecretStore 抽象 + go-keyring 实现 + 测试用内存后端
+    status: complete
+    acceptance: >
+      go test ./internal/secret 通过：Set/Get/Delete 往返、按 provider+key-id 隔离、
+      内存后端可在无钥匙链环境（CI）运行；DB 与配置文件中无 secret 内容
+    evidence: "[2026-11-18T00:25:00+08:00] go test ./internal/secret ok；往返/隔离/删除测试全过，见 run-log M1-3"
+
+  - id: M1-4
+    milestone: M1
+    title: AES-GCM 数据加密层（DEK 存钥匙链，信封加密）
+    status: complete
+    acceptance: >
+      go test ./internal/crypto 通过：加解密往返、篡改密文报错、DEK 从 SecretStore
+      获取；随机性测试（同明文两次加密密文不同）
+    evidence: "[2026-11-18T00:35:00+08:00] crypto 5 测试全过（往返/篡改/错DEK/随机化/DEK复用），见 run-log M1-4"
+
+  - id: M1-5
+    milestone: M1
+    title: 控制面 CLI（provider add/list/show/revoke，key 录入经 stdin 不回显）
+    status: complete
+    acceptance: >
+      用临时 HOME+内存 secret 后端跑 CLI 集成测试：add 后 list/show 可见元数据、
+      revoke 后 key 状态为 revoked 且路由层不可见；终端输出与 --json 均不含明文 key
+    evidence: "[2026-11-18T02:30:00+08:00] 沙箱演示 + CLI 集成测试全过，DB grep 无明文，见 run-log M1-5（--json 输出随 M2-6 前端 API 补充）"
+
+  - id: M1-6
+    milestone: M1
+    title: 密钥泄漏扫描测试（仓库/日志/DB/错误信息断言无明文 key）
+    status: complete
+    acceptance: >
+      go test 运行泄漏扫描：向系统注入测试 key 后 grep 检查源码树、测试日志输出、
+      sqlite 文件字节、CLI 输出均无该 key；M1 全量测试绿
+    evidence: "[2026-11-18T02:45:00+08:00] leakscan 全过，全仓 5 包 ok，见 run-log M1-6；M1 里程碑达成"
+
+  # ── M2: 本地代理与多 key 路由 ────────────────────────────
+  - id: M2-1
+    milestone: M2
+    title: OpenAI 兼容代理 HTTP 服务（仅绑 127.0.0.1，/v1/chat/completions、/v1/models）
+    status: complete
+    acceptance: >
+      集成测试：httptest mock 上游下 curl /v1/chat/completions 返回 200 且响应体
+      为 OpenAI chat 格式；绑定地址断言拒绝非回环接口；panic 有 recover 不 crash
+    evidence: "[2026-11-18T03:00:00+08:00] proxy 5 测试全过（转发/loopback/panic/models/404无泄漏），见 run-log M2-1"
+
+  - id: M2-2
+    milestone: M2
+    title: 进程内 key 注入（从 SecretStore 解密取 key，请求后不留存内存副本超时清除）
+    status: complete
+    acceptance: >
+      测试断言上游收到的 Authorization 为正确 key；代理日志与错误响应中不含 key；
+      key 缓存有 TTL，过期后重新从 SecretStore 读取
+    evidence: "[2026-11-18T03:10:00+08:00] keyCache TTL/invalidate 测试全过；日志结构排除 key，见 run-log M2-2"
+
+  - id: M2-3
+    milestone: M2
+    title: 多 key 路由策略（round-robin + 429/5xx 故障切换 + key 冷却）
+    status: complete
+    acceptance: >
+      测试矩阵：key A 返回 429 → 同一请求切 key B 成功且 A 进入冷却期不再被选；
+      冷却到期后 A 恢复参与；全部 key 不可用时返回 503 与结构化错误体
+    evidence: "[2026-11-18T03:30:00+08:00] failover/冷却/恢复/耗尽测试全过；修复 rr 初值 bug，见 run-log M2-3（注：全耗尽当前中继最后上游状态 429，503 语义见 M3-4 熔断统一）"
+
+  - id: M2-4
+    milestone: M2
+    title: SSE streaming 透传
+    status: complete
+    acceptance: >
+      mock 上游返回 stream=true 的 SSE，代理逐块透传且首字节延迟无明显缓冲；
+      流中途上游断开时客户端收到错误帧而非挂死
+    evidence: "[2026-11-18T03:45:00+08:00] SSE 透传/断连两用例全过，见 run-log M2-4"
+
+  - id: M2-5
+    milestone: M2
+    title: 代理生命周期 CLI（serve/stop/status + 冷却状态观测）
+    status: complete
+    acceptance: >
+      agentvault serve 后台启动并写 pid 文件；status 报告端口/各 key 健康与冷却状态；
+      stop 优雅退出；M2 全量测试绿 + 手动 curl 冒烟记录进 run-log
+    evidence: "[2026-11-18T04:00:00+08:00] serve/status/stop 沙箱演示全过（pid 56954 生命周期），见 run-log M2-5"
+
+  - id: M2-6
+    milestone: M2
+    title: 控制面前端 v0（内嵌静态页：provider → key → 模型三级视图，token 列暂为 0）
+    status: complete
+    acceptance: >
+      浏览器访问 http://127.0.0.1:<port>/ 渲染三级视图；数据来自 SQLite 真实
+      注册信息（禁止 mock 数据）；集成测试断言 API 返回与页面数据一致；
+      仅绑定 127.0.0.1
+    evidence: "[2026-11-18T04:15:00+08:00] console 3 测试全过（真实数据/页面/无泄漏），见 run-log M2-6"
+
+  - id: M2-7
+    milestone: M2
+    title: 第一次真机迁移（~/.claude/settings.json GLM key → 代理，Claude Code 真实会话）
+    status: complete
+    acceptance: >
+      改写前经决策节点 3 获用户批准；改写后 grep settings.json 无 GLM key 明文
+      （.bak diff 记 run-log）；Claude Code 经代理完成一次真实会话；前端可见该
+      provider/key/模型真实数据；截图存 docs/tasks/ 并复制到 tmp-m2-screenshots/
+    evidence: "[2026-11-20T19:55:00+08:00] 真机迁移全过：claude -p 经 127.0.0.1:8787 真实回复；settings.json/db 无明文；截图 docs/tasks/m2-7-console.png。前置 M2-7a（/v1/messages 透传）commit d1e8d30。M2 里程碑达成"
+
+  # ── M3: 用量统计与流量控制 ────────────────────────────────
+  - id: M3-1
+    milestone: M3
+    title: 调用级用量记录（provider/model/key-id/tokens/latency/status，WAL 模式）
+    status: complete
+    acceptance: >
+      集成测试：经代理的一次调用产生一条 usage 记录，字段完整；并发 50 请求无锁死、
+      记录数正确
+    evidence: "[2026-11-20T20:40:00+08:00] usage 5 测试 + proxy 集成全过；真机调用落库 17/32 tokens，见 run-log M3-1"
+
+  - id: M3-2
+    milestone: M3
+    title: 用量查询 CLI（agentvault usage，按 provider/key/时间窗过滤，--json）
+    status: complete
+    acceptance: >
+      集成测试：插入 N 条记录后查询输出与 SQL 直查一致；过滤条件正确；输出无敏感字段
+    evidence: "[2026-11-20T20:55:00+08:00] usage CLI 测试全过（过滤/JSON/时间窗），真机查询显示真实会话流量，见 run-log M3-2"
+
+  - id: M3-3
+    milestone: M3
+    title: 配额控制（per-provider / per-key 令牌窗口，超限 429）
+    status: complete
+    acceptance: >
+      设 quota 后窗口内超限请求返回 429 与 quota 错误体；窗口滚动后恢复；
+      per-key 与 per-provider 两级独立生效
+    evidence: "[2026-11-20T21:15:00+08:00] quota 4 测试全过（耗尽/独立/滚动恢复/错误体），见 run-log M3-3"
+
+  - id: M3-4
+    milestone: M3
+    title: 熔断与冷却观测（错误率熔断、CLI 可查、恢复探测）
+    status: complete
+    acceptance: >
+      连续错误达阈值触发熔断且半开探测恢复的测试通过；status 输出含熔断/冷却态
+    evidence: "[2026-11-20T21:30:00+08:00] 熔断全链路测试过（触发/半开恢复/重开/闭合），status 含 breaker keys，见 run-log M3-4"
+
+  # ── M4: 明文迁移与接入替换（按消费方式三分类）──────────────
+  - id: M4-1
+    milestone: M4
+    title: 明文扫描器（探测 shell rc、.env、litellm config、agent 工具设置/MCP env 块；按消费方式三分类）
+    status: complete
+    acceptance: >
+      在含测试 fixture（假 key 格式）的临时 HOME 下：扫描器输出每处命中的
+      文件路径/行号/变量名/key 指纹（前后 4 位掩码）与分类标签
+      （proxy-attach / run-inject / compliant），不输出完整明文；未命中时正常退出码
+    evidence: >
+      run-log 2026-11-22T00:10 条目：internal/migrate 四类解析器 + 三分类 +
+      掩码输出（构造上无完整明文）；fixture 测试全过；真机只读扫描 11 处
+      明文（.zshrc 1 / litellm 3 / codex toml 7），~/.claude/settings.json
+      零命中（M2-7 有效）
+
+  - id: M4-2
+    milestone: M4
+    title: import 导入命令（预览变更清单 → 用户确认 → 入钥匙链 + 原文件改写 + .bak 备份）
+    status: pending
+    acceptance: >
+      集成测试：import 预览模式只读不改文件；确认后 key 进 SecretStore、
+      原文件按分类改写（proxy-attach 类换 base_url、run-inject 类注释化/移除明文行）、
+      生成 .bak 且与原文件 diff 可验证；拒绝时零改动
+    evidence: >
+      run-log 2026-11-22T00:40 与 2026-11-24T16:05 条目：fixture 测试稳定；
+      真机分文件批准迁移（--only 闸门）.zshrc/codex/litellm 三文件全改写成功，
+      .bak 齐全、零明文；真机暴露的 ref 撞车 bug 已修（e95f77a）并带回归测试
+
+  - id: M4-3
+    milestone: M4
+    title: proxy-attach 接入改写（LLM 客户端 base_url 指向本地代理，shell rc 注释化 export 行）
+    status: pending
+    acceptance: >
+      测试断言：改写后 .zshrc 中 export 行被注释并附 agentvault 提示、
+      litellm/claude settings 等支持 base_url 的配置指向 http://127.0.0.1:<port>；
+      改写后环境无明文 key，代理可用该客户端语义完成一次 mock 调用
+    evidence: >
+      run-log 2026-11-22T01:05 与 2026-11-24 条目：claude settings 已指向
+      127.0.0.1:8787（11-20 真机迁移生效）；集成测试真实代理+mock 上游 200；
+      真机 .zshrc 改写后 agentvault run 注入验证通过
+
+  - id: M4-4
+    milestone: M4
+    title: run-inject：agentvault run 命令（从钥匙链解密注入子进程环境变量，配置不落明文）
+    status: pending
+    acceptance: >
+      agentvault run --env VAR=ref:provider/key -- printenv VAR 输出正确值且
+      父进程环境无该变量；测试断言 run 包装下子进程可见注入变量、
+      配置文件与输出均无明文；支持包装 MCP server 启动命令（codex env 块场景）
+    evidence: >
+      run-log 2026-11-22T01:25 与 2026-11-24T15:52 条目：测试稳定；真机
+      ref:bigmodel/primary 冒烟 + .zshrc 迁移后 run 注入实际使用（len/prefix
+      与原值吻合）
+
+  - id: M4-5
+    milestone: M4
+    title: 迁移报告（三分类汇总 + run-inject 类的一工具一 key 隔离策略指引）
+    status: pending
+    acceptance: >
+      agentvault import --report 输出三分类迁移状态汇总，run-inject 类附
+      专用 key 录入与 wrapper 配置示例指引；报告不含明文 key；真机（用户本机）
+      试运行记录进 run-log（改写用户点文件前属决策节点 3，需人批准）
+    evidence: >
+      run-log 2026-11-22T01:40 条目：报告三分类 + 指引四步，零明文断言；
+      2026-11-24 真机迁移完成后报告/扫描均为 0 命中（清零复核通过）
+
+  - id: M3-6
+    milestone: M3
+    title: 前端 token 统计接入真实用量库（三级视图第 3 层生效）
+    status: complete
+    acceptance: >
+      前端每模型 token 数与 agentvault usage / SQL 直查三方一致；展示的是迁移后
+      真实流量累计值（真机截图记 run-log，非 mock）；真实流量下触发一次配额 429
+      并可在前端/CLI 观测
+    evidence: >
+      run-log 2026-11-20T22:00 条目：三方一致性核对通过；真实流量 429
+      （quota 3000/1m，结构化错误体，429 落 usage）；截图
+      docs/tasks/m3-6-console-tokens.png；全仓测试 ok
+
+  - id: M3-5
+    milestone: M3
+    title: 文档收尾（README 使用指南、docs/design/survey.md 借鉴项目调研、docs/design/architecture.md）
+    status: complete
+    acceptance: >
+      README 含安装/录入 key/启动代理/接入客户端四步示例；survey.md 给出
+      new-api/one-api/bricks-llm/LiteLLM 的可借鉴点与本项目取舍；全量套件重跑绿
+    evidence: >
+      run-log 2026-11-20T22:20 条目：README 四步示例含 OpenAI/Anthropic 两接入
+      形态；survey.md 四项目取舍与自实现边界；architecture.md 架构图+安全模型；
+      go test -count=1 ./... 9 包全绿
