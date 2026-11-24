@@ -181,3 +181,76 @@ func TestBuildPlanFilteredPerFile(t *testing.T) {
 	}
 	t.Fatal("untouched file lost its plaintext?!")
 }
+
+func TestBuildPlanDedupsRepeatedVarUniqueRefs(t *testing.T) {
+	// Three same-var entries in one file must map to three distinct refs
+	// (regression: 2nd and 3rd used to collide on the same ref).
+	home := t.TempDir()
+	p := filepath.Join(home, ".config/litellm/config.yaml")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := `model_list:
+  - model_name: a
+    litellm_params:
+      model: openai/a
+      api_key: "key-aaaaaaaaaaaa1"
+  - model_name: b
+    litellm_params:
+      model: openai/b
+      api_key: "key-bbbbbbbbbbbb2"
+  - model_name: c
+    litellm_params:
+      model: openai/c
+      api_key: "key-cccccccccccc3"
+`
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	found, err := NewScanner(home).Scan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found) != 3 {
+		t.Fatalf("want 3 findings, got %d", len(found))
+	}
+	plan := BuildPlan(found)
+	refs := map[string]bool{}
+	for _, it := range plan.Items {
+		if refs[it.Ref] {
+			t.Fatalf("duplicate ref %s", it.Ref)
+		}
+		refs[it.Ref] = true
+	}
+	// Apply: every stored value must match its own line's key.
+	store := secret.NewMemoryStore()
+	want := map[string]string{
+		plan.Items[0].Ref: "key-aaaaaaaaaaaa1",
+		plan.Items[1].Ref: "key-bbbbbbbbbbbb2",
+		plan.Items[2].Ref: "key-cccccccccccc3",
+	}
+	if _, err := Apply(store, "agentvault", plan); err != nil {
+		t.Fatal(err)
+	}
+	for ref, v := range want {
+		got, err := store.Get("agentvault", ref)
+		if err != nil || got != v {
+			t.Fatalf("ref %s: got %q (%v), want %q", ref, got, err, v)
+		}
+	}
+}
+
+func TestEnsureYAMLBaseReplacesPrecedingAPIBase(t *testing.T) {
+	// litellm blocks put api_base before api_key.
+	lines := []string{
+		"  - model_name: a",
+		"    litellm_params:",
+		"      model: openai/a",
+		"      api_base: https://upstream.example/v1",
+		"      api_key: \"PLACEHOLDER\"",
+	}
+	out := ensureYAMLBase(lines, 4, "http://127.0.0.1:8787/v1")
+	if out[3] != "      api_base: http://127.0.0.1:8787/v1" {
+		t.Fatalf("preceding api_base not rewritten: %q", out[3])
+	}
+}

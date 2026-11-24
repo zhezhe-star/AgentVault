@@ -190,3 +190,16 @@
 - 测试：三分类段落、零明文断言、指引与 ref 清单存在。全仓 10 包 ok，vet/gofmt 干净。
 - 真机试运行（只读）：报告输出 11 处——proxy-attach 3（litellm：GLM key ×2 已在钥匙链、deepseek ×1）、run-inject 8（.zshrc ARK ×1、codex toml ×7）、compliant 0；报告无明文。
 - **待决策**：改写真实点文件（~/.zshrc、~/.config/litellm/config.yaml、~/.codex/config.toml）属决策节点 3，需用户逐项批准后方可 import --yes；批准后重跑 scan 应 0 命中即 M4 清零复核。
+
+## [2026-11-24T15:52:00+08:00] evidence: M4 真机迁移第 1/3 步 — ~/.zshrc 改写完成
+- 前置增强：BuildPlanFiltered + `import --only <file>`（按文件批准闸门，commit 4b02b41），过滤测试断言只动目标文件、其余文件明文原样保留。
+- 执行：`agentvault import --home ~ --only ~/.zshrc --yes` → ref:ark/ark_api_key 入钥匙链；原行替换为含 agentvault run 恢复指引的注释；备份 ~/.zshrc.bak-20261124-155145。
+- 验证：改写后文件 0 明文命中；`agentvault run --env ARK_API_KEY=ref:ark/ark_api_key -- sh -c …` 输出 len=46 prefix=ark-（与原值掩码一致）；预览模式确认计划只含该文件。
+
+## [2026-11-24T16:05:00+08:00] evidence: M4 真机迁移第 2/3、3/3 步 — codex 与 litellm 改写完成，清零达成
+- 用户确认 litellm 已不依赖（查证：usage.db 最后请求 11-17、fallback 告警最后 11-17、4000 端口连接数 0、当前会话经 agentvault 8787）且不再用 codex 明文配置，批准两文件改写。
+- 执行：import --only ~/.codex/config.toml --yes（7 处入钥匙链，值全改占位符）；import --only ~/.config/litellm/config.yaml --yes（4 处入钥匙链 + 占位符；config 在 15:45 被用户新增过一个 coding endpoint，扫描为 4 处而非 3 处）。
+- litellm 停用：launchctl bootout ai.zhezhu.litellm（进程 0、4000 端口无监听连接；plist 保留可恢复）。
+- **发现并修复两处潜在 bug**（commit 待记）：① ref 去重只对第 2 次出现加文件后缀，第 3+ 次与第 2 次撞 ref 互相覆盖（本次 litellm 3 个 GLM 同值侥幸无害）→ 改为文件后缀 + 次数计数器，回归测试断言同文件三个同名 var 得到三个不同 ref 且各自值正确；② ensureYAMLBase 只向后找 api_base，litellm 块中 api_base 在 api_key 之前则漏改 → 增加向前搜索且保留原行缩进，回归测试覆盖。
+- 验证：codex config.toml 7 处占位符、明文 0 命中；litellm config api_key 全占位符；`agentvault scan` → **no plaintext keys found（11 处清零，M4 清零复核达成）**。
+- 备注：litellm 的 api_base 未指代理——文件块内 api_base 在 api_key 之前，本次改写时旧逻辑漏改且该文件已随 litellm 停用而失效，无需补改；bug 已修复供后续使用。

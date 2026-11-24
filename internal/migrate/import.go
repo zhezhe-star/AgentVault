@@ -43,7 +43,7 @@ func BuildPlanFiltered(found []Finding, only []string) ImportPlan {
 		allowed[p] = true
 	}
 	plan := ImportPlan{}
-	seen := map[string]bool{}
+	seen := map[string]int{}
 	for _, f := range found {
 		if f.Class == ClassCompliant {
 			continue
@@ -56,13 +56,19 @@ func BuildPlanFiltered(found []Finding, only []string) ImportPlan {
 			provider = "misc"
 		}
 		keyID := sanitizeKeyID(f.Var)
-		// Same var in multiple files: disambiguate by file base so both
-		// secrets land in distinct keychain entries.
-		if seen[provider+"/"+keyID] {
-			base := strings.TrimSuffix(filepath.Base(f.Path), filepath.Ext(f.Path))
-			keyID = keyID + "_" + sanitizeKeyID(base)
+		// Same var multiple times (same or different files): disambiguate so
+		// every secret lands in its own keychain entry — file base first,
+		// then an occurrence counter (each ref must be unique).
+		base := sanitizeKeyID(strings.TrimSuffix(filepath.Base(f.Path), filepath.Ext(f.Path)))
+		seen[provider+"/"+keyID]++
+		n := seen[provider+"/"+keyID]
+		if n > 1 {
+			keyID = keyID + "_" + base
+			seen[provider+"/"+keyID+"_"+base]++
+			if m := seen[provider+"/"+keyID+"_"+base]; m > 1 {
+				keyID = fmt.Sprintf("%s_%d", keyID, m)
+			}
 		}
-		seen[provider+"/"+keyID] = true
 		plan.Items = append(plan.Items, ImportItem{
 			Finding: f,
 			Ref:     provider + "/" + keyID,
@@ -253,22 +259,37 @@ func baseURLOf(varName string) (string, bool) {
 	return "", false
 }
 
+// leading returns the indentation of a line.
+func leading(l string) string {
+	return l[:len(l)-len(strings.TrimLeft(l, " "))]
+}
+
 // ensureYAMLBase sets or inserts an api_base line for the api_key at idx,
 // keeping the same block (replacing an existing api_base nearby, else
 // inserting right after the api_key line with matching indent).
 func ensureYAMLBase(lines []string, idx int, base string) []string {
-	indent := lines[idx][:len(lines[idx])-len(strings.TrimLeft(lines[idx], " "))] + "  "
-	end := idx + 1
-	for end < len(lines) {
+	indent := leading(lines[idx]) + "  "
+	// Search forward within the block, then backward (litellm puts api_base
+	// before api_key).
+	for end := idx + 1; end < len(lines); end++ {
 		l := lines[end]
 		if strings.TrimSpace(l) != "" && !strings.HasPrefix(l, " ") {
 			break // dedented: left the block
 		}
 		if strings.Contains(l, "api_base:") {
-			lines[end] = indent + "api_base: " + base
+			lines[end] = leading(l) + "api_base: " + base
 			return lines
 		}
-		end++
+	}
+	for start := idx - 1; start >= 0; start-- {
+		l := lines[start]
+		if strings.Contains(l, "api_base:") {
+			lines[start] = leading(l) + "api_base: " + base
+			return lines
+		}
+		if strings.TrimSpace(l) != "" && !strings.HasPrefix(l, " ") {
+			break // dedented above the block
+		}
 	}
 	return append(lines[:idx+1], append([]string{indent + "api_base: " + base}, lines[idx+1:]...)...)
 }
