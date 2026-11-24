@@ -210,3 +210,9 @@
 - 附带处置：litellm LaunchAgent 停用（空转 7 天、零连接，plist 保留可恢复）；GLM 额度感知/兜底链路随之退役，替代方案为 agentvault quota + usage（后续可演进）。
 - 全程无明文泄漏：所有输出掩码、钥匙链经 apply 入库、备份含原文（预期内）。
 - Issue #2 四个里程碑（M1 保险箱核心 / M2 首次上线 / M3 流量控制 / M4 明文清零）全部完成。
+
+## [2026-11-24T16:25:00+08:00] evidence: litellm 退役收尾清理完成
+- ~/.claude/CLAUDE.md 重写：兜底感知段（fallback-alerts.log/gate.log 链路）替换为 AgentVault 网关段（127.0.0.1:8787，密钥钥匙链）；GLM 周额度段路径 ~/.config/litellm/glm-quota.json → ~/.config/llm-schedule/glm-quota.json（unit=6 逻辑保留），补 agentvault usage/provider quota 观测提示。
+- ~/.zshrc 死 ANTHROPIC 块（7-14 行：ark base_url / ANTHROPIC_AUTH_TOKEN 引用 / 三模型别名 / API_TIMEOUT_MS）整块移除，备份至 cleanup-backup-20261124-160416/zshrc.bak。
+- 验证：干净 login shell（env -i zsh -ic）不再导出 ARK_API_KEY / ANTHROPIC_BASE_URL（后者由 settings.json 按会话注入）；`agentvault scan` 仍 no plaintext keys found；glm-quota-check.sh 改写后已在 16:04 实跑成功（usagePct=9, level=max）。
+- 保留：codex-ark/codex-glm alias、glm-quota-check.sh；dashboard-gen.py 留档不管。
