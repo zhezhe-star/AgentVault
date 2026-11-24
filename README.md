@@ -48,6 +48,12 @@ agentvault serve --daemon   # 127.0.0.1:8787
 agentvault status           # pid / 冷却 key / 熔断 key / provider 计数
 ```
 
+**本地构建与部署纪律**（Makefile 已固化）：
+
+- `make deploy` —— 生产升级，**只允许在 main 主 checkout 执行**（非 main 分支会被拒绝并退出）。构建 → 替换 ：8787 的存活 proxy → 打印 status。
+- `make serve-dev` / `make stop-dev` —— 开发分支/worktree 专用：测试端口 `:8788` + 独立数据目录 `~/.config/agentvault-dev`（首次自动从生产库播种，钥匙链全局共享故无需重录 key），绝不触碰生产实例。
+- 日常验证跑 `make lint`（fmt + vet + test）；不要在开发 worktree 手工对 :8787 执行 `serve --daemon`。
+
 ### 4. 接入客户端（OpenAI 或 Anthropic 协议均可）
 
 OpenAI 协议（如各 CLI 的 `OPENAI_BASE_URL`）：
