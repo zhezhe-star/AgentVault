@@ -12,9 +12,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zhezhe-star/AgentVault/internal/provider"
 	"github.com/zhezhe-star/AgentVault/internal/secret"
+	"github.com/zhezhe-star/AgentVault/internal/usage"
 )
 
 const testKey = "av-proxy-test-key-0123456789"
@@ -215,4 +217,193 @@ func newTestHTTPServer(h http.Handler) *http.Server {
 // bufReadAll drains r into a byte slice.
 func bufReadAll(r io.Reader) ([]byte, error) {
 	return io.ReadAll(r)
+}
+
+// soloFixture is a one-key provider pointed at the mock upstream, plus a
+// usage store so throttling records are observable.
+func soloFixture(t *testing.T, upstreamURL string) (*Server, *usage.Store) {
+	t.Helper()
+	store, sec, svc := fixture(t, upstreamURL)
+	ustore, err := usage.Open(filepath.Join(t.TempDir(), "usage.db"))
+	if err != nil {
+		t.Fatalf("usage open: %v", err)
+	}
+	t.Cleanup(func() { ustore.Close() })
+	srv := New(store, sec, svc)
+	srv.EnableUsage(ustore)
+	srv.SetUsageSink(func(r usage.Record) { _ = ustore.Insert(r) })
+	return srv, ustore
+}
+
+func postChat(t *testing.T, base, model string) *http.Response {
+	t.Helper()
+	resp, err := http.Post(base+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"`+model+`","messages":[]}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	return resp
+}
+
+// Scenario 1: one key, upstream 429s. The first request attempts the key
+// and relays the 429; the second finds every key cooling and must get 429
+// with a Retry-After header (not 404), plus a usage record.
+func TestAllKeysCoolingReturns429WithRetryAfter(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprint(w, `{"error":{"message":"rate limited"}}`)
+	}))
+	defer upstream.Close()
+	srv, ustore := soloFixture(t, upstream.URL)
+	base := startProxy(t, srv)
+
+	resp1 := postChat(t, base, "test-model")
+	resp1.Body.Close()
+	if resp1.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("first request status = %d, want relayed 429", resp1.StatusCode)
+	}
+
+	resp2 := postChat(t, base, "test-model")
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("all-cooling status = %d, want 429", resp2.StatusCode)
+	}
+	if ra := resp2.Header.Get("Retry-After"); ra == "" {
+		t.Fatal("all-cooling 429 missing Retry-After header")
+	}
+
+	recs, err := ustore.Query(100)
+	if err != nil {
+		t.Fatalf("usage list: %v", err)
+	}
+	var cooling []usage.Record
+	for _, r := range recs {
+		if r.Status == http.StatusTooManyRequests && r.KeyID == "" {
+			cooling = append(cooling, r)
+		}
+	}
+	if len(cooling) == 0 {
+		t.Fatalf("no all-cooling usage record; records: %+v", recs)
+	}
+}
+
+// Scenario 2: a plain 429 (no Retry-After, no quota wording) is concurrency
+// throttling and takes the short cooldown, not the 60s default.
+func TestConcurrency429UsesShortCooldown(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprint(w, `{"error":{"message":"rate limited"}}`)
+	}))
+	defer upstream.Close()
+	store, sec, svc := fixture(t, upstream.URL)
+	srv := New(store, sec, svc)
+	base := startProxy(t, srv)
+
+	resp := postChat(t, base, "test-model")
+	resp.Body.Close()
+
+	ra := srv.router.retryAfter()
+	if ra <= 0 || ra > DefaultShortCooldown {
+		t.Fatalf("retryAfter = %v, want short cooldown (0, %v]", ra, DefaultShortCooldown)
+	}
+}
+
+// Scenario 3: an upstream Retry-After header sets the cooldown to its value.
+func TestRetryAfterHeaderSetsCooldown(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "7")
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprint(w, `{"error":{"message":"slow down"}}`)
+	}))
+	defer upstream.Close()
+	store, sec, svc := fixture(t, upstream.URL)
+	srv := New(store, sec, svc)
+	base := startProxy(t, srv)
+
+	resp := postChat(t, base, "test-model")
+	resp.Body.Close()
+
+	// Ceil to seconds: 7s remaining minus a hair of test latency stays 7.
+	if ra := srv.router.retryAfter(); ra != 7*time.Second {
+		t.Fatalf("retryAfter = %v, want 7s from upstream Retry-After", ra)
+	}
+}
+
+// Scenario 4: quota-worded 429s keep the long cooldown, and sustained 429s
+// still escalate to the breaker (unchanged behavior).
+func TestQuota429LongCooldownAndBreakerEscalation(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprint(w, `{"error":{"message":"insufficient quota for this key"}}`)
+	}))
+	defer upstream.Close()
+	store, sec, svc := fixture(t, upstream.URL)
+	srv := New(store, sec, svc)
+	base := startProxy(t, srv)
+
+	resp := postChat(t, base, "test-model")
+	resp.Body.Close()
+	if ra := srv.router.retryAfter(); ra <= DefaultShortCooldown {
+		t.Fatalf("quota 429 retryAfter = %v, want long cooldown", ra)
+	}
+
+	// Keep hitting it: with the cooldown shrunk to near zero every request
+	// reaches the upstream again, so consecutive 429s escalate to the breaker.
+	srv.router.cooldown = time.Millisecond
+	// Clear the long cooldown left by the first request so the loop's
+	// requests actually reach the upstream again.
+	srv.router.mu.Lock()
+	srv.router.cooldowns = map[string]time.Time{}
+	srv.router.fails = map[string]int{}
+	srv.router.mu.Unlock()
+	for i := 0; i < BreakerThreshold; i++ {
+		resp := postChat(t, base, "test-model")
+		resp.Body.Close()
+		time.Sleep(5 * time.Millisecond) // let the 1ms cooldown expire
+	}
+	if srv.router.breakerCount() != 1 {
+		t.Fatalf("breaker count = %d, want 1 after %d quota 429s", srv.router.breakerCount(), BreakerThreshold)
+	}
+}
+
+// The Responses bridge path answers an all-cooling request the same way:
+// 429 + Retry-After plus a usage record (issue #5 hit this path via glm).
+func TestResponsesAllKeysCoolingReturns429(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprint(w, `{"error":{"message":"rate limited"}}`)
+	}))
+	defer upstream.Close()
+	srv, ustore := soloFixture(t, upstream.URL)
+	base := startProxy(t, srv)
+
+	resp1, err := http.Post(base+"/v1/responses", "application/json",
+		strings.NewReader(`{"model":"test-model","input":"hi"}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	resp1.Body.Close()
+
+	resp2, err := http.Post(base+"/v1/responses", "application/json",
+		strings.NewReader(`{"model":"test-model","input":"hi"}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("all-cooling status = %d, want 429", resp2.StatusCode)
+	}
+	if resp2.Header.Get("Retry-After") == "" {
+		t.Fatal("missing Retry-After header")
+	}
+	recs, err := ustore.Query(100)
+	if err != nil {
+		t.Fatalf("usage query: %v", err)
+	}
+	for _, r := range recs {
+		if r.Status == http.StatusTooManyRequests && r.KeyID == "" {
+			return // cooling record present
+		}
+	}
+	t.Fatalf("no all-cooling usage record; records: %+v", recs)
 }

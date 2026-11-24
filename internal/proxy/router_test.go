@@ -217,3 +217,70 @@ func TestBreakerTripsAndHalfOpenRecovers(t *testing.T) {
 		t.Fatal("closed breaker should serve normally")
 	}
 }
+
+// Cooldown grading: a fail with an explicit short cooldown sits out only
+// that long, still counts toward the breaker, and retryAfter reports the
+// remaining sit-out in whole seconds.
+func TestFailShortCooldownGrading(t *testing.T) {
+	store, err := provider.Open(t.TempDir() + "/test.db")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+	_ = store.CreateProvider(provider.Provider{ID: "p", Name: "P", BaseURL: "http://x"})
+	_ = store.CreateKey(provider.Key{ID: "k", ProviderID: "p", SecretID: "ref", Status: provider.KeyActive, Weight: 1})
+	_ = store.CreateModel(provider.Model{ID: "m", ProviderID: "p", KeyID: "k", Name: "model", Upstream: "x"})
+	r := newRouter(store, time.Minute) // long default; short comes via option
+	c := candidate{providerID: "p", keyID: "k"}
+
+	r.fail(c, withCooldown(DefaultShortCooldown))
+	if _, ok := r.pick("model"); ok {
+		t.Fatal("cooling key was picked")
+	}
+	ra := r.retryAfter()
+	if ra <= 0 || ra > DefaultShortCooldown {
+		t.Fatalf("retryAfter = %v, want (0, %v] (ceil to seconds)", ra, DefaultShortCooldown)
+	}
+	// Short failures still escalate: reaching the threshold trips the breaker.
+	for i := 1; i < BreakerThreshold; i++ {
+		r.fail(c, withCooldown(DefaultShortCooldown))
+	}
+	if r.breakerCount() != 1 {
+		t.Fatalf("breaker count = %d, want 1 after %d short failures", r.breakerCount(), BreakerThreshold)
+	}
+	if r.retryAfter() > r.breakerOpen {
+		t.Fatalf("retryAfter %v exceeds breaker window %v", r.retryAfter(), r.breakerOpen)
+	}
+
+	// retryAfter is 0 when nothing is cooling.
+	r2 := newRouter(store, time.Minute)
+	if got := r2.retryAfter(); got != 0 {
+		t.Fatalf("retryAfter with empty state = %v, want 0", got)
+	}
+}
+
+// An unknown model is "known=false"; a known-but-cooling model is
+// "known=true" — this is what separates the 404 from the all-cooling 429.
+func TestKnownVsCooling(t *testing.T) {
+	store, err := provider.Open(t.TempDir() + "/test.db")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+	_ = store.CreateProvider(provider.Provider{ID: "p", Name: "P", BaseURL: "http://x"})
+	_ = store.CreateKey(provider.Key{ID: "k", ProviderID: "p", SecretID: "ref", Status: provider.KeyActive, Weight: 1})
+	_ = store.CreateModel(provider.Model{ID: "m", ProviderID: "p", KeyID: "k", Name: "model", Upstream: "x"})
+	r := newRouter(store, time.Minute)
+	c := candidate{providerID: "p", keyID: "k"}
+
+	if r.known("nope") {
+		t.Fatal("unknown model reported as known")
+	}
+	r.fail(c)
+	if !r.known("model") {
+		t.Fatal("cooling model reported as unknown")
+	}
+	if _, ok := r.pick("model"); ok {
+		t.Fatal("cooling model was picked")
+	}
+}
