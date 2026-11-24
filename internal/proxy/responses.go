@@ -546,6 +546,14 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "encode upstream request")
 		return
 	}
+	// Same alias discipline as the passthrough path: providers only know
+	// their own model ids, so rewrite the converted payload's model field
+	// to the registered upstream id (no-op for 1:1 names).
+	if mapped := s.router.upstreamName(req.Model); mapped != "" && mapped != req.Model {
+		if nb, err := rewriteModelField(payloadBytes, mapped); err == nil {
+			payloadBytes = nb
+		}
+	}
 	s.forwardResponses(w, r, &req, payloadBytes)
 }
 

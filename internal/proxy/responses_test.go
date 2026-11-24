@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/zhezhe-star/AgentVault/internal/provider"
 	"github.com/zhezhe-star/AgentVault/internal/usage"
 )
 
@@ -209,6 +210,41 @@ func TestResponsesNonStreaming(t *testing.T) {
 	if msg.Type != "message" || msg.Role != "assistant" || msg.Status != "completed" ||
 		len(msg.Content) != 1 || msg.Content[0].Type != "output_text" || msg.Content[0].Text != "the answer" {
 		t.Fatalf("message item = %+v", msg)
+	}
+}
+
+func TestResponsesAliasRewrite(t *testing.T) {
+	var gotBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = bufReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"cc2","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	}))
+	defer upstream.Close()
+
+	store, sec, svc := fixture(t, upstream.URL)
+	if err := store.CreateModel(provider.Model{ID: "m2", ProviderID: "mockprov", KeyID: "k1", Name: "alias-r", Upstream: "test-model"}); err != nil {
+		t.Fatalf("CreateModel alias: %v", err)
+	}
+	srv := New(store, sec, svc)
+	base := startProxy(t, srv)
+
+	resp, err := http.Post(base+"/v1/responses", "application/json",
+		strings.NewReader(`{"model":"alias-r","input":"say ok","stream":false}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(gotBody, &body); err != nil {
+		t.Fatalf("upstream body: %v", err)
+	}
+	if body["model"] != "test-model" {
+		t.Fatalf("upstream model = %v, want rewritten %q", body["model"], "test-model")
 	}
 }
 
