@@ -77,7 +77,7 @@ func TestDecideTargets(t *testing.T) {
 		t.Fatalf("pinned bg ignores thinking: %+v", d)
 	}
 	d = Decide(EntrypointDeep, long, nil, targets)
-	if d.MatchedRule != "pinned-deep/long-context" || d.TargetModel != targets.DeepLongContext {
+	if d.MatchedRule != "pinned-deep/long-context" || d.TargetModel != targets.LongContextTarget {
 		t.Fatalf("deep long-context: %+v", d)
 	}
 }

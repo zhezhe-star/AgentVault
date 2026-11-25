@@ -345,3 +345,34 @@ tasks:
     evidence: >
       run-log 2026-11-25T18:40 条目：go test -count=1 ./... 10 包全绿、make lint
       绿；:8788 冒烟（一次性假 key 已删）；draft PR #9 提出，不合并不部署
+
+  - id: M6-A-4
+    milestone: M6-A
+    title: M6-3 配额感知（glm-5.4[1m] 长上下文分支修正 + GLM 隐藏接口轮询 + 文件兜底 + 软分档注入 + DeepSeek 状态位）
+    status: complete
+    acceptance: >
+      目标表修正：glm-5.4[1m] 是真实别名（1M 上下文变体），deep/routine 档估算上下文
+      ≥200k tokens（可配）→ glm-5.4[1m]，bg 不迁移；GLMQuotaClient GET
+      open.bigmodel.cn/api/monitor/usage/quota/limit（Authorization 放套餐 key，复用
+      keychain 密钥，进程内不落盘不进日志），解析 percentage/next_reset_time 灌 plans；
+      5 分钟轮询 + 失败指数退避（上限 8x）+ 失败自动降级 ~/.config/llm-schedule/
+      glm-quota.json（unit=6 周额度，unit=5 五小时窗）；serve --quota-poll 开关
+      （默认开，daemon 透传）；软分档 <70/70–95/>95% 只注入 decision_reason 不改
+      GLM 选型；DeepSeek /user/balance is_available 做成可查询状态位（
+      /admin/routing 透出）。单测全部 httptest 假服务器，真机不对外发请求
+    evidence: >
+      run-log 2026-11-25T19:05 条目：internal/auto/quota_test.go 10 组（fetch 扁平
+      /data 包装/0-1 分数/鉴权头透传/非 200、LoadQuotaFile、poller API 失败降级文件
+      /成功直灌/纯文件模式、QuotaBand 边界 6 例、AnnotateQuota 不改目标、长上下文
+      deep+routine→[1m]/bg 不动/阈值可配与 0 禁用、DeepSeek Bearer+is_available+非
+      200）；go test -count=1/-count=2/-race 全绿、make lint 绿；:8788 冒烟
+      --quota-poll=false 零外联（lsof 复核），plans set/list CLI 验证
+
+  - id: M6-A-5
+    milestone: M6-A
+    title: PR #9 转 ready（标题/描述注明 M6-A 范围与证据），不合并不部署
+    status: complete
+    acceptance: >
+      M6-1/2/3 齐后 PR #9 转 ready；make lint + go test/-race 全绿；PR 描述含
+      M6-A 范围与三件套证据指引；不合并不 make deploy
+    evidence: pending

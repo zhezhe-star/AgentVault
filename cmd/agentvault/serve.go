@@ -12,12 +12,15 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/zhezhe-star/AgentVault/internal/app"
+	"github.com/zhezhe-star/AgentVault/internal/auto"
+	"github.com/zhezhe-star/AgentVault/internal/provider"
 	"github.com/zhezhe-star/AgentVault/internal/proxy"
 	"github.com/zhezhe-star/AgentVault/internal/usage"
 )
@@ -42,6 +45,9 @@ func serveCmd() *cobra.Command {
 	var addr string
 	var daemon bool
 	var queueTimeout time.Duration
+	var quotaPoll bool
+	var quotaProvider string
+	var deepseekProvider string
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Start the local proxy and control-plane console (loopback only)",
@@ -53,22 +59,50 @@ func serveCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if daemon {
-				return spawnDaemon(cfg, addr, queueTimeout)
+			opts := serveOptions{
+				QueueTimeout:     queueTimeout,
+				QuotaPoll:        quotaPoll,
+				QuotaProvider:    quotaProvider,
+				DeepSeekProvider: deepseekProvider,
 			}
-			return runProxy(cfg, addr, queueTimeout)
+			if daemon {
+				return spawnDaemon(cfg, addr, opts)
+			}
+			return runProxy(cfg, addr, opts)
 		},
 	}
 	cmd.Flags().StringVar(&addr, "addr", defaultListenAddr, "loopback address to bind")
 	cmd.Flags().BoolVar(&daemon, "daemon", false, "fork into background and return")
 	cmd.Flags().DurationVar(&queueTimeout, "queue-timeout", proxy.DefaultQueueTimeout,
 		"max wait in the concurrency queue before answering 429 (e.g. 120s)")
+	cmd.Flags().BoolVar(&quotaPoll, "quota-poll", true,
+		"poll the GLM hidden quota endpoint into plans (disable for offline/dev smoke)")
+	cmd.Flags().StringVar(&quotaProvider, "quota-provider", "bigmodel",
+		"provider id whose first active key authenticates the quota endpoint")
+	cmd.Flags().StringVar(&deepseekProvider, "deepseek-provider", "deepseek",
+		"provider id whose first active key authenticates the DeepSeek balance probe")
 	return cmd
+}
+
+// serveOptions carries the serve flag values through the daemon re-exec.
+type serveOptions struct {
+	QueueTimeout     time.Duration
+	QuotaPoll        bool
+	QuotaProvider    string
+	DeepSeekProvider string
+}
+
+func (o serveOptions) execArgs(addr string) []string {
+	return []string{"serve", "--addr", addr,
+		"--queue-timeout", o.QueueTimeout.String(),
+		"--quota-poll=" + strconv.FormatBool(o.QuotaPoll),
+		"--quota-provider", o.QuotaProvider,
+		"--deepseek-provider", o.DeepSeekProvider}
 }
 
 // spawnDaemon re-executes this binary with --daemon detached, writing the
 // child's pid file, then returns immediately.
-func spawnDaemon(cfg app.Config, addr string, queueTimeout time.Duration) error {
+func spawnDaemon(cfg app.Config, addr string, opts serveOptions) error {
 	if running := readPid(cfg); running > 0 {
 		return fmt.Errorf("proxy already running (pid %d)", running)
 	}
@@ -76,7 +110,7 @@ func spawnDaemon(cfg app.Config, addr string, queueTimeout time.Duration) error 
 	if err != nil {
 		return fmt.Errorf("resolve executable: %w", err)
 	}
-	cmd := exec.Command(exe, "serve", "--addr", addr, "--queue-timeout", queueTimeout.String())
+	cmd := exec.Command(exe, opts.execArgs(addr)...)
 	cmd.Stdout, cmd.Stderr = nil, nil
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
@@ -91,7 +125,7 @@ func spawnDaemon(cfg app.Config, addr string, queueTimeout time.Duration) error 
 }
 
 // runProxy runs the server in the foreground until interrupted.
-func runProxy(cfg app.Config, addr string, queueTimeout time.Duration) error {
+func runProxy(cfg app.Config, addr string, opts serveOptions) error {
 	store, err := cfg.OpenStore()
 	if err != nil {
 		return err
@@ -107,7 +141,7 @@ func runProxy(cfg app.Config, addr string, queueTimeout time.Duration) error {
 	defer usageStore.Close()
 
 	proxySrv := proxy.New(store, cfg.Secret, cfg.Service)
-	proxySrv.SetQueueTimeout(queueTimeout)
+	proxySrv.SetQueueTimeout(opts.QueueTimeout)
 	proxySrv.EnableUsage(usageStore)
 	proxySrv.EnableQuotas(store, usageStore)
 	proxySrv.SetUsageSink(func(r usage.Record) {
@@ -117,8 +151,18 @@ func runProxy(cfg app.Config, addr string, queueTimeout time.Duration) error {
 			_ = err
 		}
 	})
+	// The quota band always reads the local plans table — no network. The
+	// poller (below) is what refreshes it; without it the rows are only
+	// what `agentvault plans set` wrote, and an empty table reads as
+	// "unknown" (band annotation skipped).
+	proxySrv.SetQuotaSource(proxySrv.PlanUsedPct)
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if opts.QuotaPoll {
+		startQuotaMonitor(ctx, store, cfg, opts, proxySrv)
+	}
 
 	// Best-effort pid file so status/stop work for foreground runs too.
 	pid := os.Getpid()
@@ -127,6 +171,100 @@ func runProxy(cfg app.Config, addr string, queueTimeout time.Duration) error {
 
 	fmt.Printf("agentvault proxy listening on http://%s (pid %d)\n", addr, pid)
 	return proxySrv.ListenAndServe(ctx, addr)
+}
+
+// startQuotaMonitor launches the M6-3 background pollers on the serve
+// signal context: the GLM quota poller (hidden endpoint, file fallback)
+// writing the plans table, and the DeepSeek availability probe feeding the
+// /admin/routing status bit. It is only called when --quota-poll is on —
+// the offline/dev-smoke path never touches the external endpoints.
+func startQuotaMonitor(ctx context.Context, store *provider.Store, cfg app.Config, opts serveOptions, proxySrv *proxy.Server) {
+	keyFor := func(providerID string) func() (string, error) {
+		return func() (string, error) {
+			keys, err := store.ListKeys(providerID)
+			if err != nil {
+				return "", err
+			}
+			for _, k := range keys {
+				if k.Status == provider.KeyActive {
+					// Same lookup the proxy keycache uses: service +
+					// provider/key-id. The value stays in this process.
+					return cfg.Secret.Get(cfg.Service, providerID+"/"+k.ID)
+				}
+			}
+			return "", fmt.Errorf("no active key for provider %s", providerID)
+		}
+	}
+
+	poller := &auto.QuotaPoller{
+		Client: &auto.GLMQuotaClient{Key: keyFor(opts.QuotaProvider)},
+		Apply: func(snap auto.QuotaSnapshot) error {
+			return applyQuotaSnapshot(store, opts.QuotaProvider, snap)
+		},
+	}
+	go func() { _ = poller.Run(ctx) }()
+
+	dsHolder := &deepSeekHolder{}
+	proxySrv.SetDeepSeekStatus(dsHolder.get)
+	go func() {
+		client := &auto.DeepSeekClient{Key: keyFor(opts.DeepSeekProvider)}
+		for {
+			if st, err := client.IsAvailable(ctx); err == nil {
+				dsHolder.set(st)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(auto.DefaultQuotaInterval):
+			}
+		}
+	}()
+}
+
+// applyQuotaSnapshot writes one snapshot into the plans table: the window
+// length selects the row (300 min = 5h window, 7d = weekly credits).
+func applyQuotaSnapshot(store *provider.Store, providerID string, snap auto.QuotaSnapshot) error {
+	window := "5h"
+	switch snap.WindowMinutes {
+	case 7 * 24 * 60:
+		window = "weekly"
+	case 0:
+		window = "default"
+	}
+	return store.SetPlan(provider.Plan{
+		Provider:   providerID,
+		PlanTier:   "coding",
+		WindowType: window,
+		Limit:      100,
+		Remaining:  100 - snap.UsedPct,
+		RefreshedAt: func() time.Time {
+			if snap.NextReset.IsZero() {
+				return time.Now()
+			}
+			return snap.NextReset
+		}(),
+		VerifiedAt: time.Now(),
+	})
+}
+
+// deepSeekHolder caches the latest DeepSeek availability probe for the
+// routing status endpoint (mutex-guarded; writer and HTTP handler run on
+// different goroutines).
+type deepSeekHolder struct {
+	mu sync.Mutex
+	st auto.DeepSeekStatus
+}
+
+func (h *deepSeekHolder) set(st auto.DeepSeekStatus) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.st = st
+}
+
+func (h *deepSeekHolder) get() (auto.DeepSeekStatus, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.st, !h.st.CheckedAt.IsZero()
 }
 
 // readPid returns the recorded pid, or 0 when absent.

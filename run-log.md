@@ -246,3 +246,13 @@
 ## [2026-11-25T18:55:00+08:00] evidence: PR #9 CI 修复后全绿
 - 首轮 CI 仅 proxy 包两个新测试失败：usage sink 在响应流完整回写后才落记录，客户端先行断言拿到滞后/空记录（auto_test 索引 -1 panic + 字段滞后）。修复：usageRecorder 加锁 + last(t, n) 带 2s deadline 轮询（沿用 M5 消息测试同类教训）。本地 -count=2 与 -race 全绿后推送，CI check test 通过（run 45595643190）。
 - PR 现状：draft、CI pass、无 review 意见；不合并不部署，继续盯 review。
+
+## [2026-11-25T19:05:00+08:00] evidence: M6-A 补充完成——glm-5.4[1m] 修正 + M6-3 配额感知（PR #9）
+- 修正（owner 反馈 item 1）：glm-5.4[1m] 不是脚注记法，是 /v1/models 真实别名（glm-5.4 的 1M 上下文变体；glm-5.3-flash 上下文超约 20 万 tokens 报 Prompt is too long）。目标表改为：deep/routine 档估算上下文 ≥200k tokens（Targets.LongContextTokens 可配，0=禁用）→ glm-5.4[1m]（LongContextTarget），bg 档不迁移；18:40 条目中「180k/DeepLongContext/按脚注理解」作废。
+- M6-3 GLM 配额：internal/auto/quota.go——GLMQuotaClient GET open.bigmodel.cn/api/monitor/usage/quota/limit，Authorization 头直接放套餐 key（serve 从 provider store 取首把 active key，经 cfg.Secret.Get(cfg.Service, provider/keyID) 进程内读取，同 proxy keycache 通道；不落盘不进日志）；容错解析扁平与 {"data":…} 包装、0–1 分数、next_reset_time(unix-ms)；QuotaPoller 5 分钟轮询、失败指数退避翻倍上限 8x，API 失败自动降级 ~/.config/llm-schedule/glm-quota.json（unit=5→5h 窗、unit=6→weekly 周额度、unit=3 跳过），降级成功即视为恢复退避重置；Apply 灌 plans 表（window 5h/weekly，limit=100，remaining=100-pct，refreshed_at=next reset）。
+- M6-3 开关与注入：serve --quota-poll（默认开，daemon re-exec 透传；真机冒烟必须关）；--quota-provider（默认 bigmodel）/--deepseek-provider（默认 deepseek）。proxy Server 增 SetQuotaSource（serve 装 PlanUsedPct——只读本地 plans 表取最紧 percentage，空表/错误=-1 即 unknown）与 SetDeepSeekStatus；forward/forwardResponses 在 resolveAuto 后 annotateQuota——软分档 <70 healthy / 70–95 elevated / >95 critical 只追加 decision_reason（"quota-elevated (88% used)"），不改 GLM 选型目标（溢出与 owner 确认通道属 M6-C）。
+- DeepSeek 状态位：DeepSeekClient.IsAvailable GET api.deepseek.com/user/balance（Bearer 鉴权）解析 is_available；serve 起 goroutine 按 5 分钟周期探测缓存（deepSeekHolder 互斥锁），/admin/routing 透出 deepseek_available（未探测到省略）。
+- 测试（全 httptest 假服务器，绝不触真实端点）：internal/auto/quota_test.go 10 组——fetch（扁平/data 包装/0-1 分数/Authorization 透传/非 200 报错触发降级）、LoadQuotaFile（unit 5/6 保留 3 跳过/缺文件报错）、QuotaPoller（API 失败降级文件且不 fail/成功直灌 source=api/nil client 纯文件模式）、QuotaBand 边界（-1/0/69.9/70/95/95.1/100）、AnnotateQuota（unknown 不注/88% 注 elevated/不改目标）、长上下文（auto+thinking 与 pinned-deep 超阈→[1m]、routine 超阈→[1m]、bg 超阈不动、正常 routine 不动、阈值可配/0 禁用）、DeepSeek（true/Bearer 头/CheckedAt/非 200 报错）。
+- 验证：go build ./... + go vet 干净；go test -count=1 ./... 10 包绿、-count=2 auto 绿、go test -race ./... 全绿；make lint（fmt/vet/test）绿。
+- Dev 冒烟：:8788 起 bin/agentvault serve --quota-poll=false——/v1/models 三入口展示正常、/admin/routing 正常、lsof 复核进程零对外连接（红线：不对 open.bigmodel.cn/api.deepseek.com 发真实请求）；plans set bigmodel --used-pct 42 + plans list 灌数/展示验证；沙箱 HOME 一次性目录，用后删除；:8787 未触碰、未 make deploy。
+- PR：待本条提交推送后 `gh pr ready 9` 并更新标题/描述（M6-A 范围+证据），不合并不部署。

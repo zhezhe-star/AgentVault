@@ -58,7 +58,49 @@ type Server struct {
 	// queueTimeout bounds the FIFO wait when every provider of a model is
 	// at its concurrency ceiling.
 	queueTimeout time.Duration
+	// quotaUsedPct reports the most-binding plan usage percentage (0-100,
+	// -1 unknown) for the auto decision reason; wired by the serve command
+	// when quota polling is enabled (nil = no band annotation).
+	quotaUsedPct func() float64
+	// deepSeekStatus reports the cached DeepSeek is_available probe (ok
+	// false = never probed, e.g. quota polling disabled).
+	deepSeekStatus func() (auto.DeepSeekStatus, bool)
 }
+
+// SetQuotaSource installs the plan-usage reader consulted by the auto
+// decision layer (design §5 step 4: the band only annotates the reason —
+// GLM in-plan target selection is unchanged in M6-A).
+func (s *Server) SetQuotaSource(fn func() float64) { s.quotaUsedPct = fn }
+
+// SetDeepSeekStatus installs the cached availability probe reporter.
+func (s *Server) SetDeepSeekStatus(fn func() (auto.DeepSeekStatus, bool)) {
+	s.deepSeekStatus = fn
+}
+
+// planUsedPct reads the plans table and returns the highest used
+// percentage across rows (most-binding quota first). Errors degrade to
+// -1: quota awareness never blocks a request.
+func (s *Server) planUsedPct() float64 {
+	plans, err := s.store.ListPlans()
+	if err != nil {
+		return -1
+	}
+	worst := -1.0
+	for _, p := range plans {
+		if p.Limit <= 0 {
+			continue
+		}
+		pct := (p.Limit - p.Remaining) / p.Limit * 100
+		if pct > worst {
+			worst = pct
+		}
+	}
+	return worst
+}
+
+// PlanUsedPct reports the most-binding plan usage percentage (0-100) from
+// the plans table, -1 when unknown; serve installs it as the quota source.
+func (s *Server) PlanUsedPct() float64 { return s.planUsedPct() }
 
 // SetQueueTimeout overrides the FIFO queue wait budget (serve flag).
 func (s *Server) SetQueueTimeout(d time.Duration) { s.queueTimeout = d }
@@ -106,6 +148,15 @@ func resolveAuto(r *http.Request, body []byte, model string) (*http.Request, *au
 	}
 	d := auto.Decide(model, auto.ExtractFeatures(body, model), nil, auto.DefaultTargets())
 	return r.WithContext(context.WithValue(r.Context(), autoDecisionKey{}, &d)), &d
+}
+
+// annotateQuota stamps the quota band onto a decision (called after
+// resolveAuto when a quota source is installed).
+func (s *Server) annotateQuota(d *auto.Decision) {
+	if d == nil || s.quotaUsedPct == nil {
+		return
+	}
+	d.AnnotateQuota(s.quotaUsedPct())
 }
 
 // recordUsageCtx stamps the decision fields carried in the request context
@@ -321,6 +372,7 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, wireFlavor wire
 	// name. Explicit aliases keep the passthrough contract untouched.
 	r, decision := resolveAuto(r, body, req.Model)
 	if decision != nil {
+		s.annotateQuota(decision)
 		req.Model = decision.TargetModel
 		if nb, err := rewriteModelField(body, req.Model); err == nil {
 			body = nb
@@ -571,10 +623,16 @@ func (s *Server) handleRoutingStatus(w http.ResponseWriter, _ *http.Request) {
 	}
 	gstats := s.router.gateStats()
 	out := struct {
-		CoolingKeys int              `json:"cooling_keys"`
-		BreakerKeys int              `json:"breaker_keys"`
-		Providers   []providerStatus `json:"providers"`
+		CoolingKeys       int              `json:"cooling_keys"`
+		BreakerKeys       int              `json:"breaker_keys"`
+		DeepSeekAvailable *bool            `json:"deepseek_available,omitempty"`
+		Providers         []providerStatus `json:"providers"`
 	}{CoolingKeys: s.router.coolingCount(), BreakerKeys: s.router.breakerCount()}
+	if s.deepSeekStatus != nil {
+		if st, ok := s.deepSeekStatus(); ok {
+			out.DeepSeekAvailable = &st.Available
+		}
+	}
 	for _, p := range providers {
 		keys, _ := s.store.ListKeys(p.ID)
 		active := 0

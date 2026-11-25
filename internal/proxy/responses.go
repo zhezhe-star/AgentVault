@@ -550,6 +550,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	// the target alias before the upstream rewrite and routing loop.
 	r, decision := resolveAuto(r, payloadBytes, req.Model)
 	if decision != nil {
+		s.annotateQuota(decision)
 		req.Model = decision.TargetModel
 		if nb, err := rewriteModelField(payloadBytes, req.Model); err == nil {
 			payloadBytes = nb

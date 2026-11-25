@@ -11,6 +11,7 @@ package auto
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -46,11 +47,15 @@ const (
 	TierDeep       Tier = "deep"
 )
 
-// LongContextTokens is the context-size threshold above which a deep
-// request is routed to the long-context target (design §2/§12: GLM-5.4's
-// extended-context channel). It is deliberately generous so ordinary
-// coding sessions stay on the default target.
-const LongContextTokens = 180_000
+// LongContextTokens is the context-size threshold above which deep and
+// routine requests are routed to the long-context target glm-5.4[1m]
+// (the 1M-context model variant; glm-5.3-flash rejects contexts beyond
+// roughly 200k tokens with "Prompt is too long", so oversize sessions
+// must land on 5.4[1m]). Configurable per Targets.
+const LongContextTokens = 200_000
+
+// LongContextTarget is the model alias serving 1M-token contexts.
+const LongContextTarget = "glm-5.4[1m]"
 
 // Request carries the signals the rules read (design §4). Signals are
 // extracted from the request body by ClassifyFeatures; the caller fills
@@ -129,9 +134,9 @@ func Classify(r Request, rules []Rule) (Tier, string) {
 // initial table, data-driven so it can be retuned without code changes).
 type Targets struct {
 	Deep              string
-	DeepLongContext   string // deep with oversized context
 	Routine           string
 	Background        string
+	LongContextTarget string // glm-5.4[1m]: deep AND routine oversize sessions
 	LongContextTokens int
 }
 
@@ -139,18 +144,20 @@ type Targets struct {
 func DefaultTargets() Targets {
 	return Targets{
 		Deep:              "glm-5.4",
-		DeepLongContext:   "glm-5.4",
 		Routine:           "glm-5.3-flash",
 		Background:        "glm-5.3-flash",
+		LongContextTarget: LongContextTarget,
 		LongContextTokens: LongContextTokens,
 	}
 }
 
 // Target returns the model alias for a tier under the table, applying the
-// long-context override for deep requests.
+// long-context override for deep and routine requests (glm-5.3-flash
+// rejects ~200k+ token contexts, background stays put).
 func (t Targets) Target(tier Tier, r Request) string {
-	if tier == TierDeep && t.LongContextTokens > 0 && contextTokens(r) >= t.LongContextTokens {
-		return t.DeepLongContext
+	if tier != TierBackground && t.LongContextTokens > 0 && t.LongContextTarget != "" &&
+		contextTokens(r) >= t.LongContextTokens {
+		return t.LongContextTarget
 	}
 	switch tier {
 	case TierDeep:
@@ -202,11 +209,47 @@ func Decide(entrypoint string, req Request, rules []Rule, targets Targets) Decis
 		d.Reason = "classified by rule " + rule
 	}
 	d.TargetModel = targets.Target(d.Tier, req)
-	if d.Tier == TierDeep && contextTokens(req) >= targets.LongContextTokens && targets.LongContextTokens > 0 {
+	if d.Tier != TierBackground && targets.LongContextTokens > 0 && contextTokens(req) >= targets.LongContextTokens {
 		d.MatchedRule += "/long-context"
-		d.Reason += "; oversized context routed to the long-context target"
+		d.Reason += "; oversized context routed to " + targets.LongContextTarget
 	}
 	return d
+}
+
+// Quota bands for the GLM plan usage percentage (design §5 step 4).
+// M6-A scope: the band only annotates decision_reason — target selection
+// is untouched; overflow handling is the owner-gated M6-C path.
+const (
+	BandHealthy  = "quota-healthy"  // used < 70%
+	BandElevated = "quota-elevated" // 70–95%
+	BandCritical = "quota-critical" // > 95%
+)
+
+// QuotaBand maps a used-percentage (0–100) onto its band, "-1" (unknown)
+// to "".
+func QuotaBand(usedPct float64) string {
+	if usedPct < 0 {
+		return ""
+	}
+	switch {
+	case usedPct > 95:
+		return BandCritical
+	case usedPct >= 70:
+		return BandElevated
+	default:
+		return BandHealthy
+	}
+}
+
+// AnnotateQuota appends the quota band to a decision's reason (no target
+// change — GLM in-plan selection stays; overflow needs owner confirmation
+// via M6-C). usedPct < 0 means "unknown", leaving the decision untouched.
+func (d *Decision) AnnotateQuota(usedPct float64) {
+	band := QuotaBand(usedPct)
+	if band == "" {
+		return
+	}
+	d.Reason += "; " + band + fmt.Sprintf(" (%.0f%% used)", usedPct)
 }
 
 // bodyProbe mirrors the request-body fields the signal extractor reads
