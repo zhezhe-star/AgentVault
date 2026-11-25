@@ -34,7 +34,11 @@ type Provider struct {
 	// (e.g. https://open.bigmodel.cn/api/anthropic), used by the
 	// /v1/messages passthrough. Empty means the provider is OpenAI-only.
 	AnthropicBaseURL string
-	CreatedAt        time.Time
+	// Concurrency is the account-level concurrent-request ceiling for this
+	// provider, shared by all of its keys (two keys of one account do not
+	// double the capacity). 0 means unlimited.
+	Concurrency int
+	CreatedAt   time.Time
 }
 
 // Key is one credential slot of a provider. The actual secret lives in the
@@ -98,6 +102,10 @@ var migrations = []string{
 		max_tokens     INTEGER NOT NULL,
 		PRIMARY KEY (scope, ref_id)
 	)`,
+	// Migration 6: per-provider account-level concurrency limit. Existing
+	// providers default to 3 (the measured GLM coding-plan ceiling); 0
+	// disables the gate for that provider.
+	`ALTER TABLE providers ADD COLUMN concurrency INTEGER NOT NULL DEFAULT 3`,
 }
 
 // Store wraps the SQLite database.
@@ -170,8 +178,8 @@ func (s *Store) migrate() error {
 // CreateProvider inserts a new provider.
 func (s *Store) CreateProvider(p Provider) error {
 	p.CreatedAt = time.Now().UTC()
-	_, err := s.db.Exec(`INSERT INTO providers (id, name, base_url, anthropic_base_url, created_at) VALUES (?,?,?,?,?)`,
-		p.ID, p.Name, p.BaseURL, p.AnthropicBaseURL, p.CreatedAt.Format(time.RFC3339))
+	_, err := s.db.Exec(`INSERT INTO providers (id, name, base_url, anthropic_base_url, concurrency, created_at) VALUES (?,?,?,?,?,?)`,
+		p.ID, p.Name, p.BaseURL, p.AnthropicBaseURL, p.Concurrency, p.CreatedAt.Format(time.RFC3339))
 	if err != nil {
 		return fmt.Errorf("provider: create provider: %w", err)
 	}
@@ -180,7 +188,7 @@ func (s *Store) CreateProvider(p Provider) error {
 
 // ListProviders returns all providers ordered by creation time.
 func (s *Store) ListProviders() ([]Provider, error) {
-	rows, err := s.db.Query(`SELECT id, name, base_url, anthropic_base_url, created_at FROM providers ORDER BY created_at`)
+	rows, err := s.db.Query(`SELECT id, name, base_url, anthropic_base_url, concurrency, created_at FROM providers ORDER BY created_at`)
 	if err != nil {
 		return nil, fmt.Errorf("provider: list providers: %w", err)
 	}
@@ -189,7 +197,7 @@ func (s *Store) ListProviders() ([]Provider, error) {
 	for rows.Next() {
 		var p Provider
 		var created string
-		if err := rows.Scan(&p.ID, &p.Name, &p.BaseURL, &p.AnthropicBaseURL, &created); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.BaseURL, &p.AnthropicBaseURL, &p.Concurrency, &created); err != nil {
 			return nil, fmt.Errorf("provider: scan provider: %w", err)
 		}
 		p.CreatedAt, _ = time.Parse(time.RFC3339, created)
@@ -202,8 +210,8 @@ func (s *Store) ListProviders() ([]Provider, error) {
 func (s *Store) GetProvider(id string) (Provider, error) {
 	var p Provider
 	var created string
-	err := s.db.QueryRow(`SELECT id, name, base_url, anthropic_base_url, created_at FROM providers WHERE id = ?`, id).
-		Scan(&p.ID, &p.Name, &p.BaseURL, &p.AnthropicBaseURL, &created)
+	err := s.db.QueryRow(`SELECT id, name, base_url, anthropic_base_url, concurrency, created_at FROM providers WHERE id = ?`, id).
+		Scan(&p.ID, &p.Name, &p.BaseURL, &p.AnthropicBaseURL, &p.Concurrency, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return p, ErrNotFound
 	}
@@ -212,6 +220,19 @@ func (s *Store) GetProvider(id string) (Provider, error) {
 	}
 	p.CreatedAt, _ = time.Parse(time.RFC3339, created)
 	return p, nil
+}
+
+// SetConcurrency upserts the account-level concurrency limit for a
+// provider (0 = unlimited).
+func (s *Store) SetConcurrency(providerID string, n int) error {
+	res, err := s.db.Exec(`UPDATE providers SET concurrency = ? WHERE id = ?`, n, providerID)
+	if err != nil {
+		return fmt.Errorf("provider: set concurrency: %w", err)
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // CreateKey inserts a new key slot for a provider.

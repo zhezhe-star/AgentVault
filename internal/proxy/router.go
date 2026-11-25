@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"math"
 	"sort"
 	"sync"
@@ -35,6 +36,9 @@ type candidate struct {
 	baseURL          string
 	anthropicBaseURL string
 	weight           int
+	// limit is the provider's account-level concurrency ceiling (0 =
+	// unlimited), carried along so the gate never needs a DB lookup.
+	limit int
 }
 
 // router picks upstreams among the active keys serving a model, rotating
@@ -54,6 +58,8 @@ type router struct {
 	breaker map[string]bool
 	// rr remembers the last-used index per model for round-robin.
 	rr map[string]int
+	// gate enforces the per-provider account-level concurrency ceiling.
+	gate *gate
 }
 
 func newRouter(store *provider.Store, cooldown time.Duration) *router {
@@ -65,6 +71,7 @@ func newRouter(store *provider.Store, cooldown time.Duration) *router {
 		fails:       map[string]int{},
 		breaker:     map[string]bool{},
 		rr:          map[string]int{},
+		gate:        newGate(),
 	}
 }
 
@@ -91,7 +98,7 @@ func (r *router) candidates(model string) ([]candidate, error) {
 			if err != nil {
 				continue
 			}
-			out = append(out, candidate{providerID: m.ProviderID, keyID: k.ID, baseURL: p.BaseURL, anthropicBaseURL: p.AnthropicBaseURL, weight: k.Weight})
+			out = append(out, candidate{providerID: m.ProviderID, keyID: k.ID, baseURL: p.BaseURL, anthropicBaseURL: p.AnthropicBaseURL, weight: k.Weight, limit: p.Concurrency})
 		}
 	}
 	// Deterministic order: higher weight first, then key id as a stable tiebreak.
@@ -130,18 +137,105 @@ func (r *router) upstreamName(model string) string {
 	return ""
 }
 
-// pick returns the next healthy candidate for the model, or false when all
-// are cooling down (or none exist).
-func (r *router) pick(model string) (candidate, bool) {
+// acquireStatus tells the caller how an acquire attempt ended; ok alone is
+// not enough to pick the right HTTP answer.
+type acquireStatus int
+
+const (
+	// acquireOK: a candidate was granted a concurrency slot; the caller
+	// must invoke release exactly once on every path.
+	acquireOK acquireStatus = iota
+	// acquireNoCandidate: no active key serves the model, or every key is
+	// cooling down (callers use router.known to tell these apart).
+	acquireNoCandidate
+	// acquireQueuedTimeout: every provider was at capacity and the FIFO
+	// wait exceeded the queue budget.
+	acquireQueuedTimeout
+	// acquireCancelled: the client went away while queued; no slot held.
+	acquireCancelled
+)
+
+// acquire picks the next healthy candidate for the model and takes a
+// concurrency slot for its provider. Providers at their account-level
+// ceiling are skipped in favor of others; when every candidate provider is
+// full, the call joins the FIFO queue on the round-robin-chosen provider
+// until a slot is released, the queue budget expires, or the client's
+// request context is cancelled.
+//
+// On acquireOK the returned release func frees the slot and must be called
+// on every path — failover, upstream error, and after the response has
+// been fully streamed back.
+func (r *router) acquire(ctx context.Context, model string, queueTimeout time.Duration) (candidate, func(), acquireStatus) {
+	cands, err := r.healthy(model)
+	if err != nil || len(cands) == 0 {
+		return candidate{}, nil, acquireNoCandidate
+	}
+	// Rotate round-robin over the healthy candidates (advancing the
+	// pointer). rr maps model -> last used index; the zero value 0 would
+	// skip the first candidate, so treat an absent entry as "before the
+	// first".
+	r.mu.Lock()
+	last, seen := r.rr[model]
+	if !seen {
+		last = -1
+	}
+	start := (last + 1) % len(cands)
+	r.rr[model] = start
+	r.mu.Unlock()
+
+	ordered := make([]candidate, 0, len(cands))
+	for i := 0; i < len(cands); i++ {
+		ordered = append(ordered, cands[(start+i)%len(cands)])
+	}
+	// One candidate per provider: keys share the account-level ceiling, so
+	// taking a slot for any key of a provider is equivalent.
+	var perProvider []candidate
+	seenProvider := map[string]bool{}
+	for _, c := range ordered {
+		if seenProvider[c.providerID] {
+			continue
+		}
+		seenProvider[c.providerID] = true
+		perProvider = append(perProvider, c)
+	}
+
+	for _, c := range perProvider {
+		if r.gate.tryAcquire(c.providerID, c.limit) {
+			return c, r.releaser(c), acquireOK
+		}
+	}
+
+	// Every candidate provider is at capacity: FIFO-wait on the first
+	// (round-robin-chosen) provider's next freed slot.
+	c0 := perProvider[0]
+	if ctx.Err() != nil {
+		return candidate{}, nil, acquireCancelled
+	}
+	if !r.gate.acquire(ctx, c0.providerID, c0.limit, queueTimeout) {
+		if ctx.Err() != nil {
+			return candidate{}, nil, acquireCancelled
+		}
+		return candidate{}, nil, acquireQueuedTimeout
+	}
+	return c0, r.releaser(c0), acquireOK
+}
+
+func (r *router) releaser(c candidate) func() {
+	return func() { r.gate.release(c.providerID) }
+}
+
+// healthy returns the candidates that are not cooling down, in the stable
+// weight order (cooldown expiry is applied under the router lock).
+func (r *router) healthy(model string) ([]candidate, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	cands, err := r.candidates(model)
 	if err != nil || len(cands) == 0 {
-		return candidate{}, false
+		return nil, err
 	}
 	now := time.Now()
-	var healthy []candidate
+	var out []candidate
 	for _, c := range cands {
 		id := c.providerID + "/" + c.keyID
 		if until, hot := r.cooldowns[id]; hot {
@@ -150,21 +244,21 @@ func (r *router) pick(model string) (candidate, bool) {
 			}
 			delete(r.cooldowns, id) // cooldown expired
 		}
-		healthy = append(healthy, c)
+		out = append(out, c)
 	}
-	if len(healthy) == 0 {
-		return candidate{}, false
-	}
-	// Round-robin among healthy candidates. rr maps model -> last used
-	// index; the map's zero value 0 would skip the first candidate, so
-	// treat an absent entry as "before the first".
-	last, seen := r.rr[model]
-	if !seen {
-		last = -1
-	}
-	idx := (last + 1) % len(healthy)
-	r.rr[model] = idx
-	return healthy[idx], true
+	return out, nil
+}
+
+// pick is the slot-free flavor of acquire used by tests and legacy
+// callers: it never queues.
+func (r *router) pick(model string) (candidate, bool) {
+	c, _, st := r.acquire(context.Background(), model, time.Nanosecond)
+	return c, st == acquireOK
+}
+
+// gateStats snapshots per-provider in-flight/queued counts for observation.
+func (r *router) gateStats() map[string]gateStat {
+	return r.gate.stats()
 }
 
 // failOption customizes a fail() cooldown without changing failure

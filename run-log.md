@@ -216,3 +216,14 @@
 - ~/.zshrc 死 ANTHROPIC 块（7-14 行：ark base_url / ANTHROPIC_AUTH_TOKEN 引用 / 三模型别名 / API_TIMEOUT_MS）整块移除，备份至 cleanup-backup-20261124-160416/zshrc.bak。
 - 验证：干净 login shell（env -i zsh -ic）不再导出 ARK_API_KEY / ANTHROPIC_BASE_URL（后者由 settings.json 按会话注入）；`agentvault scan` 仍 no plaintext keys found；glm-quota-check.sh 改写后已在 16:04 实跑成功（usagePct=9, level=max）。
 - 保留：codex-ark/codex-glm alias、glm-quota-check.sh；dashboard-gen.py 留档不管。
+
+## [2026-11-25T16:00:00+08:00] evidence: M5 网关并发控制与排队完成（item 22）
+- 背景：GLM coding plan 实测约 3 个在途请求即上游 429（错误码 1302，官方建议请求队列/并发池）；原 pick() 只轮询+冷却不看在途数。
+- internal/proxy/gate.go：provider 级账户并发闸门（同 provider 所有 key 共享上限，容量不随 key 数翻倍）+ 每 provider FIFO 等待队列；release 把槽位直接移交队首（inFlight 不变），超时/取消的 waiter 从队列摘除不占位，已获移交的迟到 waiter 主动归还槽位（防移交竞态泄漏）。
+- router.acquire(ctx, model, queueTimeout)：冷却过滤后按 rr 顺序逐 provider tryAcquire，满则全跳；全满时在 rr 首选 provider 排队；状态区分 ok / no-candidate / queued-timeout / cancelled，HTTP 层分别映射原有 404/冷却 429、新 queued-too-long 429（含 Retry-After）、静默返回。pick() 保留为不排队薄壳（测试/兼容）。
+- 槽位释放：forward / forwardResponses 每次尝试包进闭包 defer release()——成功路径在 flushCopy 完整回写并记录 usage 之后才出闭包（流式期间持续占位），failover/上游错误/配额拒绝/取 key 失败路径全部释放，构造上不泄漏。
+- 配置：migration 6 providers.concurrency（存量行默认 3 = 实测 GLM 上限，0=不限流）；provider add --concurrency（默认 3）、provider set-concurrency <id> <n>；serve --queue-timeout（默认 120s，daemon re-exec 透传）。
+- 观测：/admin/routing 每 provider 增 in_flight/queued；agentvault status 透出两列。
+- 测试：闸门单测 5 例（超限跳过姊妹 provider / FIFO 次序 [0 1 2] / 排队超时 / 客户端取消不占位且计数不坏 / 槽位在流式回写后才释放）；集成测试：账户上限 2 + 同账户两把 key，8 并发请求上游实测峰值并发 ≤2 且全部 200；admin 端点断言 1 in-flight + 2 queued；queue-timeout 端到端 429 含 "queued too long" 文案与 Retry-After；provider store 并发列测试（存量行默认 3 / 显式 0 / upsert / ErrNotFound）。
+- 顺手修复 messages_test 的存量 data race（records 无锁 append/poll），全 proxy 包 -race -count=2 绿。
+- `make lint`（gofmt/vet/go test 全仓 10 包）全绿；沙箱 CLI 冒烟：set-concurrency 5→0→show 显示 unlimited，serve --queue-timeout 30s 启停正常。draft PR 提出；按指示不合并、不 make deploy。

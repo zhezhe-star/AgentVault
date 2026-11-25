@@ -568,8 +568,9 @@ func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, req *r
 	var lastBody []byte
 	var lastRoute candidate
 	for {
-		route, ok := s.router.pick(req.Model)
-		if !ok {
+		route, release, st := s.router.acquire(r.Context(), req.Model, s.queueTimeout)
+		switch st {
+		case acquireNoCandidate:
 			if attempted == 0 && !s.router.known(req.Model) {
 				writeError(w, http.StatusNotFound, "no active key serves model "+req.Model)
 			} else if attempted == 0 {
@@ -592,57 +593,77 @@ func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, req *r
 				})
 			}
 			return
-		}
-		if qt := s.quotas.overLimit(route); qt != nil {
-			writeQuotaError(w, qt)
+		case acquireQueuedTimeout:
+			writeQueued429(w, req.Model, s.queueTimeout)
 			s.recordUsage(usage.Record{
-				ProviderID: route.providerID, KeyID: route.keyID, Model: req.Model,
+				Model:    req.Model,
 				Protocol: protocol, Status: http.StatusTooManyRequests,
 				LatencyMS: time.Since(start).Milliseconds(),
 			})
 			return
-		}
-		key, err := s.keys.get(route.providerID, route.keyID)
-		if isNotFound(err) {
-			writeError(w, http.StatusInternalServerError, "key missing from vault")
+		case acquireCancelled:
 			return
 		}
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "fetch key from vault")
-			return
-		}
+		attempted++
 
-		upstreamURL := strings.TrimRight(route.baseURL, "/") + "/chat/completions"
-		upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(payload))
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "build upstream request")
-			return
-		}
-		upReq.Header.Set("Content-Type", "application/json")
-		upReq.Header.Set("Authorization", "Bearer "+key)
-		if req.Stream {
-			upReq.Header.Set("Accept", "text/event-stream")
-		}
+		// Same closure discipline as the passthrough loop: the concurrency
+		// slot is released on every exit, and only after the reply has
+		// been fully converted/streamed back on the success path.
+		if func() bool {
+			defer release()
 
-		resp, err := s.client.Do(upReq)
-		if err != nil {
-			s.router.fail(route)
-			s.keys.invalidate(route.providerID, route.keyID)
-			attempted++
+			if qt := s.quotas.overLimit(route); qt != nil {
+				writeQuotaError(w, qt)
+				s.recordUsage(usage.Record{
+					ProviderID: route.providerID, KeyID: route.keyID, Model: req.Model,
+					Protocol: protocol, Status: http.StatusTooManyRequests,
+					LatencyMS: time.Since(start).Milliseconds(),
+				})
+				return false
+			}
+			key, err := s.keys.get(route.providerID, route.keyID)
+			if isNotFound(err) {
+				writeError(w, http.StatusInternalServerError, "key missing from vault")
+				return false
+			}
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "fetch key from vault")
+				return false
+			}
+
+			upstreamURL := strings.TrimRight(route.baseURL, "/") + "/chat/completions"
+			upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(payload))
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "build upstream request")
+				return false
+			}
+			upReq.Header.Set("Content-Type", "application/json")
+			upReq.Header.Set("Authorization", "Bearer "+key)
+			if req.Stream {
+				upReq.Header.Set("Accept", "text/event-stream")
+			}
+
+			resp, err := s.client.Do(upReq)
+			if err != nil {
+				s.router.fail(route)
+				s.keys.invalidate(route.providerID, route.keyID)
+				return true
+			}
+			if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+				respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+				resp.Body.Close()
+				lastStatus, lastBody = resp.StatusCode, respBody
+				lastRoute = route
+				s.failUpstream(route, resp, respBody)
+				s.keys.invalidate(route.providerID, route.keyID)
+				return true
+			}
+			s.router.success(route)
+			s.deliverResponses(w, r.Context(), req, resp, route, start, protocol)
+			return false
+		}() {
 			continue
 		}
-		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-			resp.Body.Close()
-			lastStatus, lastBody = resp.StatusCode, respBody
-			lastRoute = route
-			s.failUpstream(route, resp, respBody)
-			s.keys.invalidate(route.providerID, route.keyID)
-			attempted++
-			continue
-		}
-		s.router.success(route)
-		s.deliverResponses(w, r.Context(), req, resp, route, start, protocol)
 		return
 	}
 }

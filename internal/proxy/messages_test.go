@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -183,8 +184,13 @@ func TestUsageRecordedPerCall(t *testing.T) {
 
 	store, sec, svc := fixtureAnthropic(t, upstream.URL)
 	srv := New(store, sec, svc)
+	var mu sync.Mutex
 	var records []usage.Record
-	srv.SetUsageSink(func(r usage.Record) { records = append(records, r) })
+	srv.SetUsageSink(func(r usage.Record) {
+		mu.Lock()
+		defer mu.Unlock()
+		records = append(records, r)
+	})
 	base := startProxy(t, srv)
 
 	resp, err := http.Post(base+"/v1/messages", "application/json",
@@ -198,13 +204,21 @@ func TestUsageRecordedPerCall(t *testing.T) {
 	}
 	// The sink runs after the response is fully flushed, so poll briefly.
 	deadline := time.Now().Add(2 * time.Second)
-	for len(records) == 0 && time.Now().Before(deadline) {
+	mu.Lock()
+	n := len(records)
+	mu.Unlock()
+	for n == 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
+		mu.Lock()
+		n = len(records)
+		mu.Unlock()
 	}
-	if len(records) != 1 {
-		t.Fatalf("usage records = %d, want 1", len(records))
+	if n != 1 {
+		t.Fatalf("usage records = %d, want 1", n)
 	}
+	mu.Lock()
 	r := records[0]
+	mu.Unlock()
 	if r.ProviderID != "mockanthropic" || r.KeyID != "ka" || r.Model != "anthro-model" ||
 		r.Protocol != "anthropic" || r.Status != 200 || r.TokensIn != 12 || r.TokensOut != 34 || r.LatencyMS < 0 {
 		t.Fatalf("unexpected usage record: %+v", r)
