@@ -242,3 +242,7 @@
 - Dev 冒烟：:8788 临时实例 + 本地 mock 上游——auto+thinking→glm-5.4、auto→glm-5.3-flash、auto-deep→glm-5.4、auto-bg（带 thinking 仍钉 bg）→glm-5.3-flash、显式 glm-5.4 直通原名；usage JSON 五条 task_tier/matched_rule/via_manual 全对；:8787 生产全程未触碰、未 make deploy。冒烟用一次性假 key，验证后已 `security delete-generic-password` 删除（复核 dump-keychain 无残留）。
 - PR：draft https://github.com/zhezhe-star/AgentVault/pull/9 （标题注明 M6-A），不合并、不部署，继续盯 checks/review。
 - 待后续块：M6-3 配额感知（隐藏接口客户端 + glm-quota.json 兜底 + 推断）、M6-6 owner 决策通道（NeedsOverflow 恒 false 至其落地）；M6-B/M6-C 块边界见 plan.md M6 节。
+
+## [2026-11-25T18:55:00+08:00] evidence: PR #9 CI 修复后全绿
+- 首轮 CI 仅 proxy 包两个新测试失败：usage sink 在响应流完整回写后才落记录，客户端先行断言拿到滞后/空记录（auto_test 索引 -1 panic + 字段滞后）。修复：usageRecorder 加锁 + last(t, n) 带 2s deadline 轮询（沿用 M5 消息测试同类教训）。本地 -count=2 与 -race 全绿后推送，CI check test 通过（run 45595643190）。
+- PR 现状：draft、CI pass、无 review 意见；不合并不部署，继续盯 review。
