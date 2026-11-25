@@ -227,3 +227,9 @@
 - 测试：闸门单测 5 例（超限跳过姊妹 provider / FIFO 次序 [0 1 2] / 排队超时 / 客户端取消不占位且计数不坏 / 槽位在流式回写后才释放）；集成测试：账户上限 2 + 同账户两把 key，8 并发请求上游实测峰值并发 ≤2 且全部 200；admin 端点断言 1 in-flight + 2 queued；queue-timeout 端到端 429 含 "queued too long" 文案与 Retry-After；provider store 并发列测试（存量行默认 3 / 显式 0 / upsert / ErrNotFound）。
 - 顺手修复 messages_test 的存量 data race（records 无锁 append/poll），全 proxy 包 -race -count=2 绿。
 - `make lint`（gofmt/vet/go test 全仓 10 包）全绿；沙箱 CLI 冒烟：set-concurrency 5→0→show 显示 unlimited，serve --queue-timeout 30s 启停正常。draft PR 提出；按指示不合并、不 make deploy。
+
+## [2026-11-25T17:30:00+08:00] checkpoint: M6-A 开工（auto 模式决策层核心骨架，item 21）
+- 设计依据：owner 批准 2026-11-25 的 auto 模式设计稿 v1.3（~/.orca/bots/bot-2/handoffs/auto-mode-design-draft-v1.md），原文拷入 docs/design/auto-mode.md（不改内容，头部加批准标注）。
+- 三件套更新：plan.md 增 M6 里程碑节（M6-A=M6-1/2/3、M6-B=M6-4/5、M6-C=M6-6/7/8、M6-9 校准期，每块过决策节点 2）；checklist.yaml 追加 M6-A-0..3（只追加）。
+- 本块范围：M6-1 plans 表（migration 7 + agentvault plans CLI）、M6-2 internal/auto 骨架（三入口别名 + 判档规则 v1 表驱动 + usage decision 字段落库）；M6-3 配额感知属后续，本块 auto 只做 GLM 档内选型。
+- 红线复述：钥匙不落盘不进日志；不新增第三方依赖；migration 只追加；显式别名直通行为回归不变；:8788 冒烟不碰 :8787 生产；PR 不自合。

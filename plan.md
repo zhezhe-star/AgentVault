@@ -154,3 +154,19 @@ shell rc 注释化）、`agentvault run` 环境变量注入（MCP/工具凭据�
 - 信封加密：数据密钥（DEK）存钥匙链，AES-GCM 加密 DB 内可能残留的敏感字段（如 base_url 中的凭据参数）；key 本体不进 DB。
 - 路由：默认 round-robin + cooldown（429 → 冷却 60s 可配）；每 key 独立熔断计数。
 - CLI 框架：`spf13/cobra`；配置：`~/.config/agentvault/config.toml`（不含任何密钥）。
+
+## M6 — 网关 auto 模式（owner 批准 2026-11-25, item 21；设计依据 docs/design/auto-mode.md §12）
+
+块划分（每块完成后过里程碑决策节点 2，等人验收）：
+
+- **M6-A** = M6-1（plans 表 + 价格/系数人工表 + verified_at）、M6-2（internal/auto
+  决策层骨架：档位规则 v1 + 黑名单 + decision 记录）、M6-3（配额感知：GLM 隐藏
+  接口客户端 + json 兜底 + 推断）。本块先做 M6-1/M6-2。
+- **M6-B** = M6-4（缓存亲和：会话头识别 + 绑定表 + 代价函数）、M6-5（router 改造：
+  设计稿 §10 五项）。
+- **M6-C** = M6-6（owner 决策通道：pending/approve/deny，溢出唯一入口）、M6-7
+  （错峰窗口配置 + 闲时放宽）、M6-8（观测面：usage 字段/响应头//admin 面板）。
+- **M6-9** = 两周真实流量校准期 → 调参复盘（run-log 记录数据）。
+
+实施纪律：devflow 三件套照旧；每步 lint+tests 绿；:8788 dev 端口先验；显式别名
+直通行为回归不变；部署上线前过决策节点。

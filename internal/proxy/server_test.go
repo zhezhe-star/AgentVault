@@ -181,8 +181,14 @@ func TestModelsEndpoint(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if out.Object != "list" || len(out.Data) != 1 || out.Data[0].ID != "test-model" {
+	if out.Object != "list" || len(out.Data) != 4 || out.Data[0].ID != "test-model" {
 		t.Fatalf("unexpected models payload: %+v", out)
+	}
+	// Auto tier entrypoints appear display-only, after the model rows.
+	for i, want := range []string{"auto", "auto-deep", "auto-bg"} {
+		if out.Data[1+i].ID != want || out.Data[1+i].Owned != "agentvault" {
+			t.Fatalf("expected entrypoint %s at data[%d], got %+v", want, 1+i, out.Data[1+i])
+		}
 	}
 }
 

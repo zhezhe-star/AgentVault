@@ -16,15 +16,26 @@ import (
 
 // Record is one proxied call.
 type Record struct {
-	ProviderID string    `json:"provider_id"`
-	KeyID      string    `json:"key_id"`
-	Model      string    `json:"model"`
-	Protocol   string    `json:"protocol"` // "openai" | "anthropic"
-	Status     int       `json:"status"`   // final status relayed to the client
-	TokensIn   int64     `json:"tokens_in"`
-	TokensOut  int64     `json:"tokens_out"`
-	LatencyMS  int64     `json:"latency_ms"`
-	CreatedAt  time.Time `json:"created_at"`
+	ProviderID string `json:"provider_id"`
+	KeyID      string `json:"key_id"`
+	Model      string `json:"model"`
+	Protocol   string `json:"protocol"` // "openai" | "anthropic"
+	Status     int    `json:"status"`   // final status relayed to the client
+	TokensIn   int64  `json:"tokens_in"`
+	TokensOut  int64  `json:"tokens_out"`
+	LatencyMS  int64  `json:"latency_ms"`
+	// Auto-mode decision fields (M6-A, design §11). Empty/false for
+	// explicit alias passthrough except ViaManual. Overflow,
+	// cache_rebind_cost and off_peak are reserved slots for later blocks
+	// (M6-6/M6-4/M6-7) and stay zero for now.
+	TaskTier        string    `json:"task_tier,omitempty"`
+	MatchedRule     string    `json:"matched_rule,omitempty"`
+	DecisionReason  string    `json:"decision_reason,omitempty"`
+	ViaManual       bool      `json:"via_manual"`
+	Overflow        bool      `json:"overflow"`
+	CacheRebindCost int64     `json:"cache_rebind_cost"`
+	OffPeak         bool      `json:"off_peak"`
+	CreatedAt       time.Time `json:"created_at"`
 }
 
 // Store wraps the SQLite database for usage writes/reads.
@@ -70,7 +81,45 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("usage: create index: %w", err)
 	}
+	// M6-A appends the auto-decision columns (forward-only; ALTER is
+	// idempotent via the pragma check so existing databases migrate in
+	// place without a version table).
+	for _, col := range []struct {
+		name string
+		ddl  string
+	}{
+		{"task_tier", `ALTER TABLE usage_records ADD COLUMN task_tier TEXT NOT NULL DEFAULT ''`},
+		{"matched_rule", `ALTER TABLE usage_records ADD COLUMN matched_rule TEXT NOT NULL DEFAULT ''`},
+		{"decision_reason", `ALTER TABLE usage_records ADD COLUMN decision_reason TEXT NOT NULL DEFAULT ''`},
+		{"via_manual", `ALTER TABLE usage_records ADD COLUMN via_manual INTEGER NOT NULL DEFAULT 0`},
+		{"overflow", `ALTER TABLE usage_records ADD COLUMN overflow INTEGER NOT NULL DEFAULT 0`},
+		{"cache_rebind_cost", `ALTER TABLE usage_records ADD COLUMN cache_rebind_cost INTEGER NOT NULL DEFAULT 0`},
+		{"off_peak", `ALTER TABLE usage_records ADD COLUMN off_peak INTEGER NOT NULL DEFAULT 0`},
+	} {
+		exists, err := columnExists(db, "usage_records", col.name)
+		if err != nil {
+			db.Close()
+			return nil, fmt.Errorf("usage: inspect %s: %w", col.name, err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := db.Exec(col.ddl); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("usage: add column %s: %w", col.name, err)
+		}
+	}
 	return &Store{db: db}, nil
+}
+
+// columnExists reports whether a table has the named column.
+func columnExists(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query(`SELECT name FROM pragma_table_info(?) WHERE name = ?`, table, column)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	return rows.Next(), rows.Err()
 }
 
 // Close closes the database.
@@ -84,10 +133,13 @@ func (s *Store) Insert(r Record) error {
 		r.CreatedAt = time.Now().UTC()
 	}
 	_, err := s.db.Exec(`INSERT INTO usage_records
-		(created_at, provider_id, key_id, model, protocol, status, tokens_in, tokens_out, latency_ms)
-		VALUES (?,?,?,?,?,?,?,?,?)`,
+		(created_at, provider_id, key_id, model, protocol, status, tokens_in, tokens_out, latency_ms,
+		 task_tier, matched_rule, decision_reason, via_manual, overflow, cache_rebind_cost, off_peak)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		r.CreatedAt.Format(time.RFC3339Nano), r.ProviderID, r.KeyID, r.Model,
-		r.Protocol, r.Status, r.TokensIn, r.TokensOut, r.LatencyMS)
+		r.Protocol, r.Status, r.TokensIn, r.TokensOut, r.LatencyMS,
+		r.TaskTier, r.MatchedRule, r.DecisionReason, boolInt(r.ViaManual),
+		boolInt(r.Overflow), r.CacheRebindCost, boolInt(r.OffPeak))
 	if err != nil {
 		return fmt.Errorf("usage: insert: %w", err)
 	}
@@ -133,7 +185,8 @@ func (s *Store) QueryFilter(f Filter) ([]Record, error) {
 		where, args = append(where, "created_at <= ?"), append(args, f.Until.UTC().Format(time.RFC3339Nano))
 	}
 	args = append(args, f.Limit)
-	rows, err := s.db.Query(`SELECT created_at, provider_id, key_id, model, protocol, status, tokens_in, tokens_out, latency_ms
+	rows, err := s.db.Query(`SELECT created_at, provider_id, key_id, model, protocol, status, tokens_in, tokens_out, latency_ms,
+		task_tier, matched_rule, decision_reason, via_manual, overflow, cache_rebind_cost, off_peak
 		FROM usage_records WHERE `+strings.Join(where, " AND ")+` ORDER BY id DESC LIMIT ?`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("usage: query: %w", err)
@@ -143,14 +196,24 @@ func (s *Store) QueryFilter(f Filter) ([]Record, error) {
 	for rows.Next() {
 		var r Record
 		var created string
+		var viaManual, overflow, offPeak int
 		if err := rows.Scan(&created, &r.ProviderID, &r.KeyID, &r.Model, &r.Protocol,
-			&r.Status, &r.TokensIn, &r.TokensOut, &r.LatencyMS); err != nil {
+			&r.Status, &r.TokensIn, &r.TokensOut, &r.LatencyMS,
+			&r.TaskTier, &r.MatchedRule, &r.DecisionReason, &viaManual, &overflow, &r.CacheRebindCost, &offPeak); err != nil {
 			return nil, fmt.Errorf("usage: scan: %w", err)
 		}
+		r.ViaManual, r.Overflow, r.OffPeak = viaManual == 1, overflow == 1, offPeak == 1
 		r.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // SumTokens returns cumulative (tokens_in, tokens_out) for a model, across

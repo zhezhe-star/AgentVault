@@ -101,3 +101,37 @@ func TestExtractTokensGarbage(t *testing.T) {
 		t.Fatalf("garbage: in=%d out=%d", in, out)
 	}
 }
+
+func TestDecisionFieldsRoundtrip(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "usage.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+	rec := Record{
+		ProviderID: "p", KeyID: "k", Model: "glm-5.4", Protocol: "anthropic", Status: 200,
+		TaskTier: "deep", MatchedRule: "pinned-deep", DecisionReason: "entrypoint auto-deep pins the deep tier",
+		ViaManual: true, CacheRebindCost: 42,
+	}
+	if err := s.Insert(rec); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	got, err := s.Query(10)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("Query: %v %+v", err, got)
+	}
+	g := got[0]
+	if g.TaskTier != "deep" || g.MatchedRule != "pinned-deep" || g.DecisionReason == "" ||
+		!g.ViaManual || g.CacheRebindCost != 42 || g.Overflow || g.OffPeak {
+		t.Fatalf("decision fields did not roundtrip: %+v", g)
+	}
+	// A plain record keeps the new columns at zero values.
+	if err := s.Insert(Record{ProviderID: "p", Model: "glm-5.3-flash", Protocol: "openai", Status: 200}); err != nil {
+		t.Fatalf("Insert plain: %v", err)
+	}
+	got, _ = s.Query(10)
+	plain := got[0]
+	if plain.TaskTier != "" || plain.ViaManual {
+		t.Fatalf("plain record polluted: %+v", plain)
+	}
+}

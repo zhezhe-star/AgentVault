@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/zhezhe-star/AgentVault/internal/app"
+	"github.com/zhezhe-star/AgentVault/internal/auto"
 	"github.com/zhezhe-star/AgentVault/internal/console"
 	"github.com/zhezhe-star/AgentVault/internal/provider"
 	"github.com/zhezhe-star/AgentVault/internal/secret"
@@ -85,6 +86,40 @@ func (s *Server) recordUsage(r usage.Record) {
 	if s.usageSink != nil {
 		s.usageSink(r)
 	}
+}
+
+// autoDecisionKey carries the per-request auto decision through the
+// forwarding loop so every usage record — including the 429 paths — is
+// stamped with the same audit fields (design §11).
+type autoDecisionKey struct{}
+
+// resolveAuto rewrites an auto-tier entrypoint request to its target alias
+// and returns the enriched request plus the decision (nil for explicit
+// aliases, which pass through untouched). The rules table is always the
+// defaults in M6-A: quota awareness and owner-confirmed overflow arrive
+// with M6-3/M6-6, so Decide only picks the in-plan GLM target.
+func resolveAuto(r *http.Request, body []byte, model string) (*http.Request, *auto.Decision) {
+	if !auto.IsEntrypoint(model) {
+		// Explicit alias = the escape hatch (design §3a): forward as-is,
+		// tag the usage record via_manual.
+		return r.WithContext(context.WithValue(r.Context(), autoDecisionKey{}, &auto.Decision{MatchedRule: "explicit-alias"})), nil
+	}
+	d := auto.Decide(model, auto.ExtractFeatures(body, model), nil, auto.DefaultTargets())
+	return r.WithContext(context.WithValue(r.Context(), autoDecisionKey{}, &d)), &d
+}
+
+// recordUsageCtx stamps the decision fields carried in the request context
+// and records the result.
+func (s *Server) recordUsageCtx(ctx context.Context, r usage.Record) {
+	if d, ok := ctx.Value(autoDecisionKey{}).(*auto.Decision); ok && d != nil {
+		r.TaskTier = string(d.Tier)
+		r.MatchedRule = d.MatchedRule
+		r.DecisionReason = d.Reason
+		if d.MatchedRule == "explicit-alias" {
+			r.ViaManual = true
+		}
+	}
+	s.recordUsage(r)
 }
 
 // New builds a Server over the given stores.
@@ -280,6 +315,18 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, wireFlavor wire
 		return
 	}
 
+	// Auto tier entrypoints (auto / auto-deep / auto-bg) are not model
+	// rows: resolve the target alias up front and run the rest of the
+	// normal chain (upstream rewrite, acquire, failover) on the resolved
+	// name. Explicit aliases keep the passthrough contract untouched.
+	r, decision := resolveAuto(r, body, req.Model)
+	if decision != nil {
+		req.Model = decision.TargetModel
+		if nb, err := rewriteModelField(body, req.Model); err == nil {
+			body = nb
+		}
+	}
+
 	// Providers only know their own model ids: rewrite the body's model
 	// field to the registered upstream id before forwarding so alias rows
 	// in the models table actually re-map requests (no-op for 1:1 names).
@@ -306,7 +353,7 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, wireFlavor wire
 				// unavailable", not "model missing" — 429 so clients
 				// retry, and record it so throttling is visible.
 				writeCooldown429(w, req.Model, s.router.retryAfter())
-				s.recordUsage(usage.Record{
+				s.recordUsageCtx(r.Context(), usage.Record{
 					Model:    req.Model,
 					Protocol: protocol, Status: http.StatusTooManyRequests,
 					LatencyMS: time.Since(start).Milliseconds(),
@@ -317,7 +364,7 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, wireFlavor wire
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(lastStatus)
 				_, _ = w.Write(lastBody)
-				s.recordUsage(usage.Record{
+				s.recordUsageCtx(r.Context(), usage.Record{
 					ProviderID: lastRoute.providerID, KeyID: lastRoute.keyID, Model: req.Model,
 					Protocol: protocol, Status: lastStatus,
 					LatencyMS: time.Since(start).Milliseconds(),
@@ -328,7 +375,7 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, wireFlavor wire
 			// Every candidate provider sat at its concurrency ceiling for
 			// the whole queue budget: 429 so clients retry later.
 			writeQueued429(w, req.Model, s.queueTimeout)
-			s.recordUsage(usage.Record{
+			s.recordUsageCtx(r.Context(), usage.Record{
 				Model:    req.Model,
 				Protocol: protocol, Status: http.StatusTooManyRequests,
 				LatencyMS: time.Since(start).Milliseconds(),
@@ -353,7 +400,7 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, wireFlavor wire
 			// throttling is observable).
 			if qt := s.quotas.overLimit(route); qt != nil {
 				writeQuotaError(w, qt)
-				s.recordUsage(usage.Record{
+				s.recordUsageCtx(r.Context(), usage.Record{
 					ProviderID: route.providerID, KeyID: route.keyID, Model: req.Model,
 					Protocol: protocol, Status: http.StatusTooManyRequests,
 					LatencyMS: time.Since(start).Milliseconds(),
@@ -429,7 +476,7 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, wireFlavor wire
 			_ = flushCopy(w, io.TeeReader(resp.Body, &captured))
 			resp.Body.Close()
 			tokensIn, tokensOut := usage.ExtractTokens(captured.Bytes())
-			s.recordUsage(usage.Record{
+			s.recordUsageCtx(r.Context(), usage.Record{
 				ProviderID: route.providerID, KeyID: route.keyID, Model: req.Model,
 				Protocol: protocol, Status: resp.StatusCode,
 				TokensIn: tokensIn, TokensOut: tokensOut,
@@ -496,6 +543,15 @@ func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
 		}
 		seen[m.Name] = true
 		out.Data = append(out.Data, modelEntry{ID: m.Name, Object: "model", Owned: m.ProviderID})
+	}
+	// Auto tier entrypoints are display-only: they are not model rows and
+	// never enter the polling pool — forward resolves them per request
+	// (design §3a-1).
+	for _, ep := range auto.EntryPoints {
+		if !seen[ep] {
+			seen[ep] = true
+			out.Data = append(out.Data, modelEntry{ID: ep, Object: "model", Owned: "agentvault"})
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)

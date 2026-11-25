@@ -106,6 +106,22 @@ var migrations = []string{
 	// providers default to 3 (the measured GLM coding-plan ceiling); 0
 	// disables the gate for that provider.
 	`ALTER TABLE providers ADD COLUMN concurrency INTEGER NOT NULL DEFAULT 3`,
+	// Migration 7: subscription plan quotas (auto mode M6-1, design
+	// docs/design/auto-mode.md §6). One row per provider plan tier and
+	// window (e.g. glm coding plan 5h / weekly credits); remaining/limit in
+	// the plan's own unit (credits, not tokens). verified_at is the last
+	// manual cross-check of prices/coefficients against the provider
+	// console — over 30 days old, the CLI/console reminds. Never a secret.
+	`CREATE TABLE plans (
+		provider     TEXT NOT NULL,
+		plan_tier    TEXT NOT NULL,
+		window_type  TEXT NOT NULL,
+		limit_value  REAL NOT NULL,
+		remaining    REAL NOT NULL,
+		refreshed_at TEXT NOT NULL,
+		verified_at  TEXT NOT NULL,
+		PRIMARY KEY (provider, plan_tier, window_type)
+	)`,
 }
 
 // Store wraps the SQLite database.
@@ -370,6 +386,85 @@ func (s *Store) ListQuotas() ([]Quota, error) {
 			return nil, fmt.Errorf("provider: scan quota: %w", err)
 		}
 		out = append(out, q)
+	}
+	return out, rows.Err()
+}
+
+// Plan is one subscription-plan quota row (auto mode M6-1): a provider's
+// plan tier observed over a window type ("5h" | "weekly" | ...). Values are
+// in the plan's own unit (e.g. GLM coding-plan credits), not tokens.
+type Plan struct {
+	Provider    string
+	PlanTier    string
+	WindowType  string
+	Limit       float64
+	Remaining   float64
+	RefreshedAt time.Time // when the gateway last refreshed remaining
+	VerifiedAt  time.Time // last manual price/coeff cross-check
+}
+
+// SetPlan upserts a plan row (refreshing remaining/limit).
+func (s *Store) SetPlan(p Plan) error {
+	if p.RefreshedAt.IsZero() {
+		p.RefreshedAt = time.Now().UTC()
+	}
+	if p.VerifiedAt.IsZero() {
+		p.VerifiedAt = time.Now().UTC()
+	}
+	_, err := s.db.Exec(`INSERT INTO plans (provider, plan_tier, window_type, limit_value, remaining, refreshed_at, verified_at)
+		VALUES (?,?,?,?,?,?,?)
+		ON CONFLICT(provider, plan_tier, window_type) DO UPDATE SET
+			limit_value=excluded.limit_value, remaining=excluded.remaining,
+			refreshed_at=excluded.refreshed_at, verified_at=excluded.verified_at`,
+		p.Provider, p.PlanTier, p.WindowType, p.Limit, p.Remaining,
+		p.RefreshedAt.Format(time.RFC3339), p.VerifiedAt.Format(time.RFC3339))
+	if err != nil {
+		return fmt.Errorf("provider: set plan: %w", err)
+	}
+	return nil
+}
+
+// ListPlans returns all plan rows ordered by provider and window.
+func (s *Store) ListPlans() ([]Plan, error) {
+	rows, err := s.db.Query(`SELECT provider, plan_tier, window_type, limit_value, remaining, refreshed_at, verified_at FROM plans
+		ORDER BY provider, plan_tier, window_type`)
+	if err != nil {
+		return nil, fmt.Errorf("provider: list plans: %w", err)
+	}
+	defer rows.Close()
+	return scanPlans(rows)
+}
+
+// GetPlan fetches one plan row; ErrNotFound when absent.
+func (s *Store) GetPlan(providerID, planTier, windowType string) (Plan, error) {
+	var p Plan
+	rows, err := s.db.Query(`SELECT provider, plan_tier, window_type, limit_value, remaining, refreshed_at, verified_at FROM plans
+		WHERE provider = ? AND plan_tier = ? AND window_type = ?`, providerID, planTier, windowType)
+	if err != nil {
+		return p, fmt.Errorf("provider: get plan: %w", err)
+	}
+	defer rows.Close()
+	plans, err := scanPlans(rows)
+	if err != nil {
+		return p, err
+	}
+	if len(plans) == 0 {
+		return p, ErrNotFound
+	}
+	return plans[0], nil
+}
+
+func scanPlans(rows *sql.Rows) ([]Plan, error) {
+	var out []Plan
+	for rows.Next() {
+		var p Plan
+		var refreshed, verified string
+		if err := rows.Scan(&p.Provider, &p.PlanTier, &p.WindowType, &p.Limit, &p.Remaining, &refreshed, &verified); err != nil {
+			return nil, fmt.Errorf("provider: scan plan: %w", err)
+		}
+		p.RefreshedAt, _ = time.Parse(time.RFC3339, refreshed)
+		p.VerifiedAt, _ = time.Parse(time.RFC3339, verified)
+		out = append(out, p)
 	}
 	return out, rows.Err()
 }
