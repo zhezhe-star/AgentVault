@@ -375,4 +375,7 @@ tasks:
     acceptance: >
       M6-1/2/3 齐后 PR #9 转 ready；make lint + go test/-race 全绿；PR 描述含
       M6-A 范围与三件套证据指引；不合并不 make deploy
-    evidence: pending
+    evidence: >
+      run-log 2026-11-25T19:05 条目 + commit 26da33a；PR #9 标题/描述已注明
+      M6-A 范围（M6-1/2/3 + glm-5.4[1m] 修正）与证据指引，CI check test 通过
+      （run 45597198707），已 gh pr ready 9；不合并不部署，盯 review
