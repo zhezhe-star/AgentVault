@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/zhezhe-star/AgentVault/internal/auto"
 	"github.com/zhezhe-star/AgentVault/internal/provider"
@@ -46,12 +48,42 @@ func autoServer(t *testing.T, upstreamURL string) (*Server, *usageRecorder) {
 	return srv, rec
 }
 
-// usageRecorder collects usage records for assertions.
+// usageRecorder collects usage records for assertions. The sink fires
+// after the response has been fully streamed, so the client can observe
+// the response before the record lands — readers must poll with a
+// deadline rather than assert immediately.
 type usageRecorder struct {
+	mu      sync.Mutex
 	records []usage.Record
 }
 
-func (u *usageRecorder) add(r usage.Record) { u.records = append(u.records, r) }
+func (u *usageRecorder) add(r usage.Record) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.records = append(u.records, r)
+}
+
+// last waits until at least n records exist and returns the last one.
+func (u *usageRecorder) last(t *testing.T, n int) usage.Record {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		u.mu.Lock()
+		got := len(u.records)
+		var r usage.Record
+		if got > 0 {
+			r = u.records[got-1]
+		}
+		u.mu.Unlock()
+		if got >= n {
+			return r
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("usage records: got %d, want >= %d", got, n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
 
 // TestAutoEntrypointsRouteToTargetAliases covers M6-2 end to end: entrypoint
 // in, concrete GLM alias upstream, decision fields in usage.
@@ -90,7 +122,7 @@ func TestAutoEntrypointsRouteToTargetAliases(t *testing.T) {
 		if len(seen) != i+1 || seen[i] != tc.wantModel {
 			t.Fatalf("case %d: upstream saw %v, want %s", i, seen, tc.wantModel)
 		}
-		got := rec.records[len(rec.records)-1]
+		got := rec.last(t, i+1)
 		if got.TaskTier != tc.wantTier || got.MatchedRule != tc.wantRule || got.ViaManual != tc.wantManual {
 			t.Fatalf("case %d: usage decision fields %+v", i, got)
 		}
@@ -119,7 +151,7 @@ func TestExplicitAliasPassthroughRegression(t *testing.T) {
 	if len(seen) != 1 || seen[0] != "test-model" {
 		t.Fatalf("upstream saw %v, want test-model", seen)
 	}
-	got := rec.records[len(rec.records)-1]
+	got := rec.last(t, 1)
 	if got.ViaManual != true || got.TaskTier != "" || got.MatchedRule != "explicit-alias" {
 		t.Fatalf("explicit alias usage fields: %+v", got)
 	}
@@ -160,7 +192,7 @@ func TestAutoResponsesEntrypoint(t *testing.T) {
 	if len(seen) != 1 || seen[0] != "glm-5.4" {
 		t.Fatalf("responses bridge upstream saw %v, want glm-5.4", seen)
 	}
-	got := rec.records[len(rec.records)-1]
+	got := rec.last(t, 1)
 	if got.TaskTier != "deep" || got.MatchedRule != "pinned-deep" || got.ViaManual {
 		t.Fatalf("responses usage fields: %+v", got)
 	}
