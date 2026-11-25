@@ -307,7 +307,7 @@ tasks:
   - id: M6-A-1
     milestone: M6-A
     title: M6-1 plans 表（SQLite migration 7 追加式）+ CLI 灌数入口 + store 单测
-    status: in_progress
+    status: complete
     acceptance: >
       provider store 追加 migration 7：plans 表含 provider、plan_tier、window_type、
       limit、remaining、refreshed_at、verified_at 字段；agentvault plans set/list
@@ -317,7 +317,7 @@ tasks:
   - id: M6-A-2
     milestone: M6-A
     title: M6-2 internal/auto 决策层骨架（档位入口别名 + 判档规则 v1 表驱动 + usage decision 字段落库）
-    status: pending
+    status: complete
     acceptance: >
       auto/auto-deep/auto-bg 三入口：不注册 models 行、不进轮询池、/v1/models
       展示层加入、known()/candidates()/forward 走专门分支；判档规则 v1 表驱动，
@@ -327,14 +327,21 @@ tasks:
       task_tier/matched_rule/decision_reason/via_manual 落库（overflow/
       cache_rebind_cost/off_peak 留空位）；每条信号单测覆盖；显式别名直通行为
       回归测试不变；本块不做配额感知与溢出确认（M6-3/M6-6 后续块）
-    evidence: pending
+    evidence: >
+      run-log 2026-11-25T18:40 条目：internal/auto 单测 7 组（入口识别/信号优先
+      级 6 例/deep 不降档/目标表+长上下文/pinned 跳判档/overflow 恒 false/双
+      wire thinking 提取）；proxy 集成 4 例（三入口端到端路由+usage 字段/显式
+      别名回归+404 语义/responses 桥入口/known-candidates 分支）；:8788 真机
+      冒烟五请求路由全对
 
   - id: M6-A-3
     milestone: M6-A
     title: 验证与 PR（go test 全绿、make lint 全绿、:8788 dev 冒烟、开 M6-A PR 不合并不部署）
-    status: pending
+    status: complete
     acceptance: >
       go test -count=1 ./... 全绿；make lint 全绿；:8788 起临时实例冒烟（auto
       三入口请求 + 显式别名回归），绝不碰 :8787；PR 标题注明 M6-A，不合并、
       不 make deploy；盯 checks 与 review 修复
-    evidence: pending
+    evidence: >
+      run-log 2026-11-25T18:40 条目：go test -count=1 ./... 10 包全绿、make lint
+      绿；:8788 冒烟（一次性假 key 已删）；draft PR #9 提出，不合并不部署

@@ -233,3 +233,12 @@
 - 三件套更新：plan.md 增 M6 里程碑节（M6-A=M6-1/2/3、M6-B=M6-4/5、M6-C=M6-6/7/8、M6-9 校准期，每块过决策节点 2）；checklist.yaml 追加 M6-A-0..3（只追加）。
 - 本块范围：M6-1 plans 表（migration 7 + agentvault plans CLI）、M6-2 internal/auto 骨架（三入口别名 + 判档规则 v1 表驱动 + usage decision 字段落库）；M6-3 配额感知属后续，本块 auto 只做 GLM 档内选型。
 - 红线复述：钥匙不落盘不进日志；不新增第三方依赖；migration 只追加；显式别名直通行为回归不变；:8788 冒烟不碰 :8787 生产；PR 不自合。
+
+## [2026-11-25T18:40:00+08:00] evidence: M6-A 完成（M6-1 plans 表 + M6-2 internal/auto 骨架，PR #9）
+- M6-1：provider migration 7（只追加）plans 表 provider/plan_tier/window_type/limit_value/remaining/refreshed_at/verified_at，主键三元组；SetPlan upsert / ListPlans / GetPlan(ErrNotFound)；CLI `agentvault plans set|list`（--used-pct 换算、verified>30 天标 verify 提醒）。TestPlanLifecycle 覆盖 upsert/多窗口/NotFound。
+- M6-2：internal/auto 独立包——三入口 auto/auto-deep/auto-bg（不建 models 行、candidates() 拒绝、known() 专门分支 true、/v1/models 展示层追加 owned_by=agentvault）；判档规则 v1 表驱动 DefaultRules（thinking-on > alias-haiku > tools-present > small-max-tokens > no-tools > default，全部归 routine 兜底），deep 不降档由优先序构造保证并有单测；ExtractFeatures 双 wire 提取 thinking（anthropic thinking.type=enabled / reasoning_effort≠none / reasoning.effort），不读 system；目标表数据驱动 deep→glm-5.4（长上下文阈值 180k tokens 走 DeepLongContext，注释注明设计稿 [1m] 记法按脚注理解、目标暂同 glm-5.4）、routine/bg→glm-5.3-flash；pinned 入口跳判档但保留长上下文目标与观测。
+- usage.Record 增 task_tier/matched_rule/decision_reason/via_manual 落库（usage 列幂等追加，无版本表），overflow/cache_rebind_cost/off_peak 留空位；forward/forwardResponses 全部 recordUsage 站点经 recordUsageCtx 统一打标，429 路径同样可审计；显式别名 matched_rule=explicit-alias、via_manual=true，其余字段零值。
+- 验证：go test -count=1 ./... 10 包全绿（新增 auto 7 组单测、proxy 集成 4 例、provider/usage store 测试）；make lint（gofmt/vet/test）绿。
+- Dev 冒烟：:8788 临时实例 + 本地 mock 上游——auto+thinking→glm-5.4、auto→glm-5.3-flash、auto-deep→glm-5.4、auto-bg（带 thinking 仍钉 bg）→glm-5.3-flash、显式 glm-5.4 直通原名；usage JSON 五条 task_tier/matched_rule/via_manual 全对；:8787 生产全程未触碰、未 make deploy。冒烟用一次性假 key，验证后已 `security delete-generic-password` 删除（复核 dump-keychain 无残留）。
+- PR：draft https://github.com/zhezhe-star/AgentVault/pull/9 （标题注明 M6-A），不合并、不部署，继续盯 checks/review。
+- 待后续块：M6-3 配额感知（隐藏接口客户端 + glm-quota.json 兜底 + 推断）、M6-6 owner 决策通道（NeedsOverflow 恒 false 至其落地）；M6-B/M6-C 块边界见 plan.md M6 节。
