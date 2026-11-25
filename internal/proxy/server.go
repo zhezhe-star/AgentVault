@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"strconv"
@@ -34,6 +35,10 @@ func (e *UpstreamError) Error() string {
 	return fmt.Sprintf("proxy: upstream status %d", e.Status)
 }
 
+// DefaultQueueTimeout is how long a request may wait in the FIFO
+// concurrency queue before it is answered with 429 + Retry-After.
+const DefaultQueueTimeout = 120 * time.Second
+
 // Server is the proxy HTTP server.
 type Server struct {
 	store  *provider.Store
@@ -49,7 +54,13 @@ type Server struct {
 	usageSink  func(usage.Record)
 	quotas     *quotaChecker
 	usageStore *usage.Store
+	// queueTimeout bounds the FIFO wait when every provider of a model is
+	// at its concurrency ceiling.
+	queueTimeout time.Duration
 }
+
+// SetQueueTimeout overrides the FIFO queue wait budget (serve flag).
+func (s *Server) SetQueueTimeout(d time.Duration) { s.queueTimeout = d }
 
 // SetUsageSink installs the per-call usage recorder.
 func (s *Server) SetUsageSink(fn func(usage.Record)) { s.usageSink = fn }
@@ -79,14 +90,15 @@ func (s *Server) recordUsage(r usage.Record) {
 // New builds a Server over the given stores.
 func New(store *provider.Store, sec secret.Store, service string) *Server {
 	s := &Server{
-		store:  store,
-		secret: sec,
-		svc:    service,
-		keys:   newKeyCache(sec, service),
-		router: newRouter(store, DefaultCooldown),
-		client: &http.Client{Timeout: 10 * time.Minute},
-		mux:    http.NewServeMux(),
-		logger: func(_ RequestLog) {},
+		store:        store,
+		secret:       sec,
+		svc:          service,
+		keys:         newKeyCache(sec, service),
+		router:       newRouter(store, DefaultCooldown),
+		client:       &http.Client{Timeout: 10 * time.Minute},
+		mux:          http.NewServeMux(),
+		logger:       func(_ RequestLog) {},
+		queueTimeout: DefaultQueueTimeout,
 	}
 	s.mux.HandleFunc("/v1/chat/completions", s.handleChat)
 	s.mux.HandleFunc("/v1/responses", s.handleResponses)
@@ -284,8 +296,9 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, wireFlavor wire
 	var lastBody []byte
 	var lastRoute candidate
 	for {
-		route, ok := s.router.pick(req.Model)
-		if !ok {
+		route, release, st := s.router.acquire(r.Context(), req.Model, s.queueTimeout)
+		switch st {
+		case acquireNoCandidate:
 			if attempted == 0 && !s.router.known(req.Model) {
 				writeError(w, http.StatusNotFound, "no active key serves model "+req.Model)
 			} else if attempted == 0 {
@@ -311,97 +324,122 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, wireFlavor wire
 				})
 			}
 			return
-		}
-
-		// Rolling-window quota check: over-limit requests are rejected
-		// with 429 before touching the upstream (and recorded so the
-		// throttling is observable).
-		if qt := s.quotas.overLimit(route); qt != nil {
-			writeQuotaError(w, qt)
+		case acquireQueuedTimeout:
+			// Every candidate provider sat at its concurrency ceiling for
+			// the whole queue budget: 429 so clients retry later.
+			writeQueued429(w, req.Model, s.queueTimeout)
 			s.recordUsage(usage.Record{
-				ProviderID: route.providerID, KeyID: route.keyID, Model: req.Model,
+				Model:    req.Model,
 				Protocol: protocol, Status: http.StatusTooManyRequests,
 				LatencyMS: time.Since(start).Milliseconds(),
 			})
 			return
-		}
-
-		// Fetch the key in-process (TTL-cached; never persisted or logged).
-		key, err := s.keys.get(route.providerID, route.keyID)
-		if isNotFound(err) {
-			writeError(w, http.StatusInternalServerError, "key missing from vault")
-			return
-		}
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "fetch key from vault")
+		case acquireCancelled:
+			// The client went away while queued; nothing to answer.
 			return
 		}
 
-		base := route.baseURL
-		if wireFlavor.upstreamPath == wireAnthropic.upstreamPath {
-			base = route.anthropicBaseURL
-			if base == "" {
-				writeError(w, http.StatusNotFound, "provider does not serve the Anthropic protocol")
-				return
+		// attempt returns true to continue the failover loop (failures
+		// only); any terminal answer means the request is done. The slot
+		// is released on every exit — critically only after the response
+		// has been fully streamed back, so streaming bodies still count
+		// toward the provider's ceiling.
+		attempted++
+		if func() bool {
+			defer release()
+
+			// Rolling-window quota check: over-limit requests are rejected
+			// with 429 before touching the upstream (and recorded so the
+			// throttling is observable).
+			if qt := s.quotas.overLimit(route); qt != nil {
+				writeQuotaError(w, qt)
+				s.recordUsage(usage.Record{
+					ProviderID: route.providerID, KeyID: route.keyID, Model: req.Model,
+					Protocol: protocol, Status: http.StatusTooManyRequests,
+					LatencyMS: time.Since(start).Milliseconds(),
+				})
+				return false
 			}
-		}
-		upstreamURL := strings.TrimRight(base, "/") + wireFlavor.upstreamPath
-		upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(body))
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "build upstream request")
-			return
-		}
-		upReq.Header.Set("Content-Type", "application/json")
-		wireFlavor.setAuth(upReq, key)
-		// Protocol headers pass through; the client's credential headers are
-		// deliberately NOT forwarded (the vault key replaces them).
-		for _, h := range []string{"anthropic-version", "anthropic-beta", "accept"} {
-			if v := r.Header.Get(h); v != "" {
-				upReq.Header.Set(h, v)
+
+			// Fetch the key in-process (TTL-cached; never persisted or logged).
+			key, err := s.keys.get(route.providerID, route.keyID)
+			if isNotFound(err) {
+				writeError(w, http.StatusInternalServerError, "key missing from vault")
+				return false
 			}
-		}
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "fetch key from vault")
+				return false
+			}
 
-		resp, err := s.client.Do(upReq)
-		if err != nil {
-			s.router.fail(route)
-			s.keys.invalidate(route.providerID, route.keyID)
-			attempted++
-			continue
-		}
+			base := route.baseURL
+			if wireFlavor.upstreamPath == wireAnthropic.upstreamPath {
+				base = route.anthropicBaseURL
+				if base == "" {
+					writeError(w, http.StatusNotFound, "provider does not serve the Anthropic protocol")
+					return false
+				}
+			}
+			upstreamURL := strings.TrimRight(base, "/") + wireFlavor.upstreamPath
+			upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(body))
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "build upstream request")
+				return false
+			}
+			upReq.Header.Set("Content-Type", "application/json")
+			wireFlavor.setAuth(upReq, key)
+			// Protocol headers pass through; the client's credential headers are
+			// deliberately NOT forwarded (the vault key replaces them).
+			for _, h := range []string{"anthropic-version", "anthropic-beta", "accept"} {
+				if v := r.Header.Get(h); v != "" {
+					upReq.Header.Set(h, v)
+				}
+			}
 
-		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-			// Drain and stash the failure, cool the key, try the next one.
-			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+			resp, err := s.client.Do(upReq)
+			if err != nil {
+				s.router.fail(route)
+				s.keys.invalidate(route.providerID, route.keyID)
+				return true
+			}
+
+			if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+				// Drain and stash the failure, cool the key, try the next one.
+				respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+				resp.Body.Close()
+				lastStatus, lastBody = resp.StatusCode, respBody
+				lastRoute = route
+				s.failUpstream(route, resp, respBody)
+				s.keys.invalidate(route.providerID, route.keyID)
+				return true
+			}
+			s.router.success(route)
+
+			// Copy upstream response headers and stream the body through (SSE
+			// transparently included: no buffering beyond header flush). A
+			// bounded tee captures the bytes so usage can be extracted after
+			// the stream ends.
+			for k, vs := range resp.Header {
+				for _, v := range vs {
+					w.Header().Add(k, v)
+				}
+			}
+			w.WriteHeader(resp.StatusCode)
+			var captured bytes.Buffer
+			_ = flushCopy(w, io.TeeReader(resp.Body, &captured))
 			resp.Body.Close()
-			lastStatus, lastBody = resp.StatusCode, respBody
-			lastRoute = route
-			s.failUpstream(route, resp, respBody)
-			s.keys.invalidate(route.providerID, route.keyID)
-			attempted++
+			tokensIn, tokensOut := usage.ExtractTokens(captured.Bytes())
+			s.recordUsage(usage.Record{
+				ProviderID: route.providerID, KeyID: route.keyID, Model: req.Model,
+				Protocol: protocol, Status: resp.StatusCode,
+				TokensIn: tokensIn, TokensOut: tokensOut,
+				LatencyMS: time.Since(start).Milliseconds(),
+			})
+			return false
+		}() {
+			// The attempt failed over to another candidate.
 			continue
 		}
-		s.router.success(route)
-
-		// Copy upstream response headers and stream the body through (SSE
-		// transparently included: no buffering beyond header flush). A
-		// bounded tee captures the bytes so usage can be extracted after
-		// the stream ends.
-		for k, vs := range resp.Header {
-			for _, v := range vs {
-				w.Header().Add(k, v)
-			}
-		}
-		w.WriteHeader(resp.StatusCode)
-		var captured bytes.Buffer
-		_ = flushCopy(w, io.TeeReader(resp.Body, &captured))
-		resp.Body.Close()
-		tokensIn, tokensOut := usage.ExtractTokens(captured.Bytes())
-		s.recordUsage(usage.Record{
-			ProviderID: route.providerID, KeyID: route.keyID, Model: req.Model,
-			Protocol: protocol, Status: resp.StatusCode,
-			TokensIn: tokensIn, TokensOut: tokensOut,
-			LatencyMS: time.Since(start).Milliseconds(),
-		})
 		return
 	}
 }
@@ -468,11 +506,14 @@ func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleRoutingStatus(w http.ResponseWriter, _ *http.Request) {
 	providers, _ := s.store.ListProviders()
 	type providerStatus struct {
-		ID     string `json:"id"`
-		Name   string `json:"name"`
-		Keys   int    `json:"keys_active"`
-		Models int    `json:"models"`
+		ID       string `json:"id"`
+		Name     string `json:"name"`
+		Keys     int    `json:"keys_active"`
+		Models   int    `json:"models"`
+		InFlight int    `json:"in_flight"`
+		Queued   int    `json:"queued"`
 	}
+	gstats := s.router.gateStats()
 	out := struct {
 		CoolingKeys int              `json:"cooling_keys"`
 		BreakerKeys int              `json:"breaker_keys"`
@@ -487,7 +528,11 @@ func (s *Server) handleRoutingStatus(w http.ResponseWriter, _ *http.Request) {
 			}
 		}
 		models, _ := s.store.ListModels(p.ID)
-		out.Providers = append(out.Providers, providerStatus{ID: p.ID, Name: p.Name, Keys: active, Models: len(models)})
+		gs := gstats[p.ID]
+		out.Providers = append(out.Providers, providerStatus{
+			ID: p.ID, Name: p.Name, Keys: active, Models: len(models),
+			InFlight: gs.InFlight, Queued: gs.Queued,
+		})
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
@@ -555,6 +600,21 @@ func writeCooldown429(w http.ResponseWriter, model string, retryAfter time.Durat
 	}
 	writeError(w, http.StatusTooManyRequests,
 		"all keys serving model "+model+" are cooling down (rate limited upstream); retry later")
+}
+
+// writeQueued429 answers a request that sat out the full queue budget with
+// every candidate provider at its concurrency ceiling: the same 429 +
+// Retry-After semantics as the cooldown path, but the message names the
+// queue so operators can tell throttle-cooling from concurrency queuing
+// apart in client logs.
+func writeQueued429(w http.ResponseWriter, model string, queuedFor time.Duration) {
+	retry := time.Duration(int64(math.Ceil(queuedFor.Seconds()))) * time.Second
+	if retry < time.Second {
+		retry = time.Second
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())))
+	writeError(w, http.StatusTooManyRequests,
+		"queued too long: all providers serving model "+model+" are at their concurrency ceiling; retry later")
 }
 
 // writeQuotaError emits a structured 429 naming the quota that tripped.

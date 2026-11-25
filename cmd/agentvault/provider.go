@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,12 +25,13 @@ func providerCmd() *cobra.Command {
 		Use:   "provider",
 		Short: "Manage model providers and their keys",
 	}
-	cmd.AddCommand(providerAddCmd(), providerListCmd(), providerShowCmd(), providerRevokeCmd(), providerAddModelCmd(), providerQuotaCmd())
+	cmd.AddCommand(providerAddCmd(), providerListCmd(), providerShowCmd(), providerRevokeCmd(), providerAddModelCmd(), providerQuotaCmd(), providerSetConcurrencyCmd())
 	return cmd
 }
 
 func providerAddCmd() *cobra.Command {
 	var name, baseURL, anthropicBaseURL string
+	var concurrency int
 	cmd := &cobra.Command{
 		Use:   "add <provider-id>",
 		Short: "Register a provider (metadata only; add keys separately)",
@@ -49,6 +51,7 @@ func providerAddCmd() *cobra.Command {
 			defer store.Close()
 			if err := store.CreateProvider(provider.Provider{
 				ID: args[0], Name: name, BaseURL: baseURL, AnthropicBaseURL: anthropicBaseURL,
+				Concurrency: concurrency,
 			}); err != nil {
 				return err
 			}
@@ -60,6 +63,8 @@ func providerAddCmd() *cobra.Command {
 	cmd.Flags().StringVar(&baseURL, "base-url", "", "provider API base URL")
 	cmd.Flags().StringVar(&anthropicBaseURL, "anthropic-base-url", "",
 		"optional Anthropic-compatible endpoint for /v1/messages passthrough")
+	cmd.Flags().IntVar(&concurrency, "concurrency", 3,
+		"account-level concurrent request ceiling shared by all keys of this provider (0 = unlimited)")
 	_ = cmd.MarkFlagRequired("name")
 	_ = cmd.MarkFlagRequired("base-url")
 	return cmd
@@ -114,8 +119,8 @@ func providerShowCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "provider: %s (%s)\nbase-url: %s\nanthropic-base-url: %s\ncreated: %s\n",
-				p.ID, p.Name, p.BaseURL, p.AnthropicBaseURL, p.CreatedAt.Format(time.RFC3339))
+			fmt.Fprintf(cmd.OutOrStdout(), "provider: %s (%s)\nbase-url: %s\nanthropic-base-url: %s\nconcurrency: %d\ncreated: %s\n",
+				p.ID, p.Name, p.BaseURL, p.AnthropicBaseURL, p.Concurrency, p.CreatedAt.Format(time.RFC3339))
 			keys, err := store.ListKeys(p.ID)
 			if err != nil {
 				return err
@@ -266,6 +271,40 @@ func providerAddModelCmd() *cobra.Command {
 	cmd.Flags().StringVar(&upstream, "upstream", "", "model id at the provider (default: the requested model name)")
 	_ = cmd.MarkFlagRequired("key-id")
 	return cmd
+}
+
+// providerSetConcurrencyCmd sets the account-level concurrency ceiling of
+// a provider (0 lifts the limit entirely).
+func providerSetConcurrencyCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "set-concurrency <provider-id> <n>",
+		Short: "Set the account-level concurrent request ceiling (0 = unlimited)",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			n, err := strconv.Atoi(args[1])
+			if err != nil || n < 0 {
+				return fmt.Errorf("concurrency must be a non-negative integer, got %q", args[1])
+			}
+			cfg, err := app.Resolve()
+			if err != nil {
+				return err
+			}
+			store, err := cfg.OpenStore()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			if err := store.SetConcurrency(args[0], n); err != nil {
+				return err
+			}
+			if n == 0 {
+				fmt.Fprintf(cmd.OutOrStdout(), "provider %s concurrency: unlimited\n", args[0])
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "provider %s concurrency: %d\n", args[0], n)
+			}
+			return nil
+		},
+	}
 }
 
 func providerQuotaCmd() *cobra.Command {

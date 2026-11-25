@@ -41,28 +41,34 @@ const defaultListenAddr = "127.0.0.1:8787"
 func serveCmd() *cobra.Command {
 	var addr string
 	var daemon bool
+	var queueTimeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Start the local proxy and control-plane console (loopback only)",
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if queueTimeout < 0 {
+				return fmt.Errorf("--queue-timeout must be non-negative")
+			}
 			cfg, err := app.Resolve()
 			if err != nil {
 				return err
 			}
 			if daemon {
-				return spawnDaemon(cfg, addr)
+				return spawnDaemon(cfg, addr, queueTimeout)
 			}
-			return runProxy(cfg, addr)
+			return runProxy(cfg, addr, queueTimeout)
 		},
 	}
 	cmd.Flags().StringVar(&addr, "addr", defaultListenAddr, "loopback address to bind")
 	cmd.Flags().BoolVar(&daemon, "daemon", false, "fork into background and return")
+	cmd.Flags().DurationVar(&queueTimeout, "queue-timeout", proxy.DefaultQueueTimeout,
+		"max wait in the concurrency queue before answering 429 (e.g. 120s)")
 	return cmd
 }
 
 // spawnDaemon re-executes this binary with --daemon detached, writing the
 // child's pid file, then returns immediately.
-func spawnDaemon(cfg app.Config, addr string) error {
+func spawnDaemon(cfg app.Config, addr string, queueTimeout time.Duration) error {
 	if running := readPid(cfg); running > 0 {
 		return fmt.Errorf("proxy already running (pid %d)", running)
 	}
@@ -70,7 +76,7 @@ func spawnDaemon(cfg app.Config, addr string) error {
 	if err != nil {
 		return fmt.Errorf("resolve executable: %w", err)
 	}
-	cmd := exec.Command(exe, "serve", "--addr", addr)
+	cmd := exec.Command(exe, "serve", "--addr", addr, "--queue-timeout", queueTimeout.String())
 	cmd.Stdout, cmd.Stderr = nil, nil
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
@@ -85,7 +91,7 @@ func spawnDaemon(cfg app.Config, addr string) error {
 }
 
 // runProxy runs the server in the foreground until interrupted.
-func runProxy(cfg app.Config, addr string) error {
+func runProxy(cfg app.Config, addr string, queueTimeout time.Duration) error {
 	store, err := cfg.OpenStore()
 	if err != nil {
 		return err
@@ -101,6 +107,7 @@ func runProxy(cfg app.Config, addr string) error {
 	defer usageStore.Close()
 
 	proxySrv := proxy.New(store, cfg.Secret, cfg.Service)
+	proxySrv.SetQueueTimeout(queueTimeout)
 	proxySrv.EnableUsage(usageStore)
 	proxySrv.EnableQuotas(store, usageStore)
 	proxySrv.SetUsageSink(func(r usage.Record) {
@@ -203,10 +210,12 @@ func statusCmd() *cobra.Command {
 				CoolingKeys int `json:"cooling_keys"`
 				BreakerKeys int `json:"breaker_keys"`
 				Providers   []struct {
-					ID     string `json:"id"`
-					Name   string `json:"name"`
-					Keys   int    `json:"keys_active"`
-					Models int    `json:"models"`
+					ID       string `json:"id"`
+					Name     string `json:"name"`
+					Keys     int    `json:"keys_active"`
+					Models   int    `json:"models"`
+					InFlight int    `json:"in_flight"`
+					Queued   int    `json:"queued"`
 				} `json:"providers"`
 			}
 			if err := decodeJSON(resp.Body, &out); err != nil {
@@ -214,7 +223,8 @@ func statusCmd() *cobra.Command {
 			}
 			fmt.Printf("cooling keys: %d\nbreaker keys: %d\n", out.CoolingKeys, out.BreakerKeys)
 			for _, p := range out.Providers {
-				fmt.Printf("provider %s (%s): %d active keys, %d models\n", p.ID, p.Name, p.Keys, p.Models)
+				fmt.Printf("provider %s (%s): %d active keys, %d models, in-flight %d, queued %d\n",
+					p.ID, p.Name, p.Keys, p.Models, p.InFlight, p.Queued)
 			}
 			return nil
 		},

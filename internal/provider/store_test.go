@@ -120,3 +120,43 @@ func TestModelMappings(t *testing.T) {
 		t.Fatal("duplicate model accepted, want UNIQUE violation")
 	}
 }
+
+func TestConcurrencyColumn(t *testing.T) {
+	s := openTestStore(t)
+	// Migration 6 defaults rows without an explicit value (i.e. providers
+	// that predate the column) to the measured GLM account ceiling of 3;
+	// an explicit 0 records "unlimited".
+	_ = s.CreateProvider(Provider{ID: "p1", Name: "P1", BaseURL: "https://example.com", Concurrency: 3})
+	_ = s.CreateProvider(Provider{ID: "p2", Name: "P2", BaseURL: "https://example.com", Concurrency: 0})
+	// A row written as the pre-M5 schema would have written it (no
+	// concurrency column) must pick up the migration default of 3.
+	if _, err := s.db.Exec(`INSERT INTO providers (id, name, base_url, created_at) VALUES ('legacy','L','https://example.com','2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatalf("legacy insert: %v", err)
+	}
+
+	p1, err := s.GetProvider("p1")
+	if err != nil {
+		t.Fatalf("GetProvider p1: %v", err)
+	}
+	if p1.Concurrency != 3 {
+		t.Fatalf("explicit concurrency = %d, want 3", p1.Concurrency)
+	}
+	p2, _ := s.GetProvider("p2")
+	if p2.Concurrency != 0 {
+		t.Fatalf("explicit unlimited = %d, want 0", p2.Concurrency)
+	}
+	legacy, _ := s.GetProvider("legacy")
+	if legacy.Concurrency != 3 {
+		t.Fatalf("legacy default concurrency = %d, want 3", legacy.Concurrency)
+	}
+
+	if err := s.SetConcurrency("p1", 5); err != nil {
+		t.Fatalf("SetConcurrency: %v", err)
+	}
+	if p, _ := s.GetProvider("p1"); p.Concurrency != 5 {
+		t.Fatalf("after set concurrency = %d, want 5", p.Concurrency)
+	}
+	if err := s.SetConcurrency("missing", 1); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("SetConcurrency(missing) err = %v, want ErrNotFound", err)
+	}
+}

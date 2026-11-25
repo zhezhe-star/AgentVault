@@ -249,3 +249,45 @@ tasks:
       run-log 2026-11-20T22:20 条目：README 四步示例含 OpenAI/Anthropic 两接入
       形态；survey.md 四项目取舍与自实现边界；architecture.md 架构图+安全模型；
       go test -count=1 ./... 9 包全绿
+
+  # ── M5: 网关并发控制与排队（owner 2026-11-25 指示，item 22）──
+  - id: M5-1
+    milestone: M5
+    title: 并发闸门与 FIFO 排队（provider 级账户并发上限、排队超时 429、流式结束才释放槽位）
+    status: complete
+    acceptance: >
+      internal/proxy 新增并发闸门：按 provider 统计在途数（同 provider 所有 key
+      共享账户级上限，容量不随 key 数翻倍）；达到上限的 provider 在 pick() 中
+      跳过、全部候选满时 FIFO 排队；排队默认 120s 上限可配，超时 429 +
+      Retry-After（文案 queued too long）；客户端断开出队不占位；槽位在
+      flushCopy 返回后释放，failover/失败路径同样释放不泄漏
+    evidence: >
+      run-log 2026-11-25T16:00 条目：gate.go + router.acquire；闸门单测 5 例
+      （超限跳过/FIFO 顺序/排队超时/客户端取消不占位/流式结束才释放）+
+      集成测试（账户上限 2 时上游实测并发 ≤2、8 请求全部 200 排队成功）；
+      -race -count=2 稳定
+
+  - id: M5-2
+    milestone: M5
+    title: 并发配置（providers.concurrency 列默认 3、provider set-concurrency、serve --queue-timeout）
+    status: complete
+    acceptance: >
+      provider 表加 concurrency 列（0=不限流，存量行迁移默认 3）；
+      agentvault provider set-concurrency <id> <n>；serve 增 --queue-timeout
+      旗标（daemon 重启透传）；provider add --concurrency 默认 3
+    evidence: >
+      run-log 2026-11-25T16:00 条目：migration 6；store 测试（存量行默认 3/
+      显式 0=不限/upsert/不存在报 ErrNotFound）；沙箱 CLI 冒烟 set-concurrency
+      5→0→show 输出 unlimited；serve --queue-timeout 30s 启停正常
+
+  - id: M5-3
+    milestone: M5
+    title: 并发观测与验收（/admin/routing in-flight/queued、status CLI、lint 全绿）
+    status: complete
+    acceptance: >
+      /admin/routing 增 per-provider in_flight/queued 计数；agentvault status
+      透出；make lint（fmt/vet/test 全仓）全绿；draft PR 提出、不合并不部署
+    evidence: >
+      run-log 2026-11-25T16:00 条目：admin 端点测试断言 1 in-flight + 2 queued；
+      status CLI 输出 in-flight/queued；make lint 全仓 10 包全绿；draft PR 由
+      协调者审阅，合并与 deploy 留待 owner 批准
