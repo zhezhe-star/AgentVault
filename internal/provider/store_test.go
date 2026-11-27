@@ -160,3 +160,41 @@ func TestConcurrencyColumn(t *testing.T) {
 		t.Fatalf("SetConcurrency(missing) err = %v, want ErrNotFound", err)
 	}
 }
+
+func TestPlanLifecycle(t *testing.T) {
+	s := openTestStore(t)
+	if err := s.SetPlan(Plan{
+		Provider: "bigmodel", PlanTier: "max", WindowType: "weekly",
+		Limit: 100, Remaining: 91,
+	}); err != nil {
+		t.Fatalf("set plan: %v", err)
+	}
+	// Upsert overwrites the row in place (append-only table semantics).
+	if err := s.SetPlan(Plan{
+		Provider: "bigmodel", PlanTier: "max", WindowType: "weekly",
+		Limit: 120, Remaining: 30,
+	}); err != nil {
+		t.Fatalf("upsert plan: %v", err)
+	}
+	p, err := s.GetPlan("bigmodel", "max", "weekly")
+	if err != nil {
+		t.Fatalf("get plan: %v", err)
+	}
+	if p.Limit != 120 || p.Remaining != 30 || p.Provider != "bigmodel" {
+		t.Fatalf("plan row: %+v", p)
+	}
+	if p.RefreshedAt.IsZero() || p.VerifiedAt.IsZero() {
+		t.Fatalf("refreshed/verified must default to now: %+v", p)
+	}
+	if _, err := s.GetPlan("bigmodel", "max", "5h"); err != ErrNotFound {
+		t.Fatalf("missing plan should be ErrNotFound, got %v", err)
+	}
+	// Multiple windows per tier coexist.
+	if err := s.SetPlan(Plan{Provider: "bigmodel", PlanTier: "max", WindowType: "5h", Limit: 10, Remaining: 10}); err != nil {
+		t.Fatalf("set 5h plan: %v", err)
+	}
+	ps, err := s.ListPlans()
+	if err != nil || len(ps) != 2 {
+		t.Fatalf("list plans: %v %+v", err, ps)
+	}
+}

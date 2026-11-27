@@ -291,3 +291,91 @@ tasks:
       run-log 2026-11-25T16:00 条目：admin 端点测试断言 1 in-flight + 2 queued；
       status CLI 输出 in-flight/queued；make lint 全仓 10 包全绿；draft PR 由
       协调者审阅，合并与 deploy 留待 owner 批准
+
+  # ── M6-A: auto 模式决策层核心骨架（owner 批准 2026-11-25, item 21, 设计稿 docs/design/auto-mode.md）──
+  - id: M6-A-0
+    milestone: M6-A
+    title: 设计稿落仓与三件套更新（docs/design/auto-mode.md 原文拷入 + M6 里程碑节 + 本清单追加）
+    status: complete
+    acceptance: >
+      设计稿 v1.3 原文拷入 docs/design/auto-mode.md（不改内容，头部标注 owner
+      批准 2026-11-25 item 21）；plan.md 增 M6 节按 §12 块划分；checklist 只追加
+    evidence: >
+      run-log 2026-11-25T17:30 条目：docs/design/auto-mode.md 头部注释标注批准；
+      plan.md M6 节含 M6-A/B/C 与 M6-9 划分及决策节点说明
+
+  - id: M6-A-1
+    milestone: M6-A
+    title: M6-1 plans 表（SQLite migration 7 追加式）+ CLI 灌数入口 + store 单测
+    status: complete
+    acceptance: >
+      provider store 追加 migration 7：plans 表含 provider、plan_tier、window_type、
+      limit、remaining、refreshed_at、verified_at 字段；agentvault plans set/list
+      CLI 可灌数与查看；store 层单测覆盖 upsert/list/迁移幂等；不改历史 migration
+    evidence: pending
+
+  - id: M6-A-2
+    milestone: M6-A
+    title: M6-2 internal/auto 决策层骨架（档位入口别名 + 判档规则 v1 表驱动 + usage decision 字段落库）
+    status: complete
+    acceptance: >
+      auto/auto-deep/auto-bg 三入口：不注册 models 行、不进轮询池、/v1/models
+      展示层加入、known()/candidates()/forward 走专门分支；判档规则 v1 表驱动，
+      信号优先级 thinking > 别名语义(haiku) > tools 结构 > max_tokens/上下文长度，
+      不用 system 提示特征，判不出一律 routine，deep 档永不降档；初始目标规则表
+      deep→glm-5.4 / routine→glm-5.3-flash / bg→glm-5.3-flash；usage.Record 增
+      task_tier/matched_rule/decision_reason/via_manual 落库（overflow/
+      cache_rebind_cost/off_peak 留空位）；每条信号单测覆盖；显式别名直通行为
+      回归测试不变；本块不做配额感知与溢出确认（M6-3/M6-6 后续块）
+    evidence: >
+      run-log 2026-11-25T18:40 条目：internal/auto 单测 7 组（入口识别/信号优先
+      级 6 例/deep 不降档/目标表+长上下文/pinned 跳判档/overflow 恒 false/双
+      wire thinking 提取）；proxy 集成 4 例（三入口端到端路由+usage 字段/显式
+      别名回归+404 语义/responses 桥入口/known-candidates 分支）；:8788 真机
+      冒烟五请求路由全对
+
+  - id: M6-A-3
+    milestone: M6-A
+    title: 验证与 PR（go test 全绿、make lint 全绿、:8788 dev 冒烟、开 M6-A PR 不合并不部署）
+    status: complete
+    acceptance: >
+      go test -count=1 ./... 全绿；make lint 全绿；:8788 起临时实例冒烟（auto
+      三入口请求 + 显式别名回归），绝不碰 :8787；PR 标题注明 M6-A，不合并、
+      不 make deploy；盯 checks 与 review 修复
+    evidence: >
+      run-log 2026-11-25T18:40 条目：go test -count=1 ./... 10 包全绿、make lint
+      绿；:8788 冒烟（一次性假 key 已删）；draft PR #9 提出，不合并不部署
+
+  - id: M6-A-4
+    milestone: M6-A
+    title: M6-3 配额感知（glm-5.4[1m] 长上下文分支修正 + GLM 隐藏接口轮询 + 文件兜底 + 软分档注入 + DeepSeek 状态位）
+    status: complete
+    acceptance: >
+      目标表修正：glm-5.4[1m] 是真实别名（1M 上下文变体），deep/routine 档估算上下文
+      ≥200k tokens（可配）→ glm-5.4[1m]，bg 不迁移；GLMQuotaClient GET
+      open.bigmodel.cn/api/monitor/usage/quota/limit（Authorization 放套餐 key，复用
+      keychain 密钥，进程内不落盘不进日志），解析 percentage/next_reset_time 灌 plans；
+      5 分钟轮询 + 失败指数退避（上限 8x）+ 失败自动降级 ~/.config/llm-schedule/
+      glm-quota.json（unit=6 周额度，unit=5 五小时窗）；serve --quota-poll 开关
+      （默认开，daemon 透传）；软分档 <70/70–95/>95% 只注入 decision_reason 不改
+      GLM 选型；DeepSeek /user/balance is_available 做成可查询状态位（
+      /admin/routing 透出）。单测全部 httptest 假服务器，真机不对外发请求
+    evidence: >
+      run-log 2026-11-25T19:05 条目：internal/auto/quota_test.go 10 组（fetch 扁平
+      /data 包装/0-1 分数/鉴权头透传/非 200、LoadQuotaFile、poller API 失败降级文件
+      /成功直灌/纯文件模式、QuotaBand 边界 6 例、AnnotateQuota 不改目标、长上下文
+      deep+routine→[1m]/bg 不动/阈值可配与 0 禁用、DeepSeek Bearer+is_available+非
+      200）；go test -count=1/-count=2/-race 全绿、make lint 绿；:8788 冒烟
+      --quota-poll=false 零外联（lsof 复核），plans set/list CLI 验证
+
+  - id: M6-A-5
+    milestone: M6-A
+    title: PR #9 转 ready（标题/描述注明 M6-A 范围与证据），不合并不部署
+    status: complete
+    acceptance: >
+      M6-1/2/3 齐后 PR #9 转 ready；make lint + go test/-race 全绿；PR 描述含
+      M6-A 范围与三件套证据指引；不合并不 make deploy
+    evidence: >
+      run-log 2026-11-25T19:05 条目 + commit 26da33a；PR #9 标题/描述已注明
+      M6-A 范围（M6-1/2/3 + glm-5.4[1m] 修正）与证据指引，CI check test 通过
+      （run 45597198707），已 gh pr ready 9；不合并不部署，盯 review

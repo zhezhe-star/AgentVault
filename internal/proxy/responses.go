@@ -546,6 +546,16 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "encode upstream request")
 		return
 	}
+	// Same auto discipline as the passthrough path: resolve entrypoints to
+	// the target alias before the upstream rewrite and routing loop.
+	r, decision := resolveAuto(r, payloadBytes, req.Model)
+	if decision != nil {
+		s.annotateQuota(decision)
+		req.Model = decision.TargetModel
+		if nb, err := rewriteModelField(payloadBytes, req.Model); err == nil {
+			payloadBytes = nb
+		}
+	}
 	// Same alias discipline as the passthrough path: providers only know
 	// their own model ids, so rewrite the converted payload's model field
 	// to the registered upstream id (no-op for 1:1 names).
@@ -577,7 +587,7 @@ func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, req *r
 				// Every key is cooling down: 429 so clients retry, and
 				// record it so throttling is visible.
 				writeCooldown429(w, req.Model, s.router.retryAfter())
-				s.recordUsage(usage.Record{
+				s.recordUsageCtx(r.Context(), usage.Record{
 					Model:    req.Model,
 					Protocol: protocol, Status: http.StatusTooManyRequests,
 					LatencyMS: time.Since(start).Milliseconds(),
@@ -586,7 +596,7 @@ func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, req *r
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(lastStatus)
 				_, _ = w.Write(lastBody)
-				s.recordUsage(usage.Record{
+				s.recordUsageCtx(r.Context(), usage.Record{
 					ProviderID: lastRoute.providerID, KeyID: lastRoute.keyID, Model: req.Model,
 					Protocol: protocol, Status: lastStatus,
 					LatencyMS: time.Since(start).Milliseconds(),
@@ -595,7 +605,7 @@ func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, req *r
 			return
 		case acquireQueuedTimeout:
 			writeQueued429(w, req.Model, s.queueTimeout)
-			s.recordUsage(usage.Record{
+			s.recordUsageCtx(r.Context(), usage.Record{
 				Model:    req.Model,
 				Protocol: protocol, Status: http.StatusTooManyRequests,
 				LatencyMS: time.Since(start).Milliseconds(),
@@ -614,7 +624,7 @@ func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, req *r
 
 			if qt := s.quotas.overLimit(route); qt != nil {
 				writeQuotaError(w, qt)
-				s.recordUsage(usage.Record{
+				s.recordUsageCtx(r.Context(), usage.Record{
 					ProviderID: route.providerID, KeyID: route.keyID, Model: req.Model,
 					Protocol: protocol, Status: http.StatusTooManyRequests,
 					LatencyMS: time.Since(start).Milliseconds(),
@@ -687,7 +697,7 @@ func (s *Server) deliverResponses(w http.ResponseWriter, ctx context.Context, re
 
 	if req.Stream {
 		tokensIn, tokensOut := streamResponses(w, ctx, req, resp.Body)
-		s.recordUsage(usage.Record{
+		s.recordUsageCtx(ctx, usage.Record{
 			ProviderID: route.providerID, KeyID: route.keyID, Model: req.Model,
 			Protocol: protocol, Status: http.StatusOK,
 			TokensIn: tokensIn, TokensOut: tokensOut,
@@ -715,7 +725,7 @@ func (s *Server) deliverResponses(w http.ResponseWriter, ctx context.Context, re
 	if u := out.Usage; u != nil {
 		tokensIn, tokensOut = u.InputTokens, u.OutputTokens
 	}
-	s.recordUsage(usage.Record{
+	s.recordUsageCtx(ctx, usage.Record{
 		ProviderID: route.providerID, KeyID: route.keyID, Model: req.Model,
 		Protocol: protocol, Status: resp.StatusCode,
 		TokensIn: tokensIn, TokensOut: tokensOut,

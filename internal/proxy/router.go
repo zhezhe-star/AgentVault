@@ -2,11 +2,13 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"sort"
 	"sync"
 	"time"
 
+	"github.com/zhezhe-star/AgentVault/internal/auto"
 	"github.com/zhezhe-star/AgentVault/internal/provider"
 )
 
@@ -77,6 +79,13 @@ func newRouter(store *provider.Store, cooldown time.Duration) *router {
 
 // candidates returns every active key that serves the given model.
 func (r *router) candidates(model string) ([]candidate, error) {
+	if auto.IsEntrypoint(model) {
+		// Auto tier entrypoints are not model rows and never enter the
+		// polling pool: forward resolves them to a concrete alias before
+		// acquire. If one ever reaches here anyway, refuse rather than
+		// silently returning nothing (keeps 404-vs-429 semantics honest).
+		return nil, fmt.Errorf("proxy: %s is an auto tier entrypoint, not a routable model", model)
+	}
 	models, err := r.store.ListAllModels()
 	if err != nil {
 		return nil, err
@@ -116,6 +125,11 @@ func (r *router) candidates(model string) ([]candidate, error) {
 // callers use known to tell "no such model" (404) apart from "every key
 // is cooling down" (429).
 func (r *router) known(model string) bool {
+	if auto.IsEntrypoint(model) {
+		// Entrypoints are always "known": they resolve through the auto
+		// decision layer, not the models table (display-only names).
+		return true
+	}
 	cands, err := r.candidates(model)
 	return err == nil && len(cands) > 0
 }
