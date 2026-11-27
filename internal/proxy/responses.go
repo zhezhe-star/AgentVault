@@ -547,30 +547,17 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Same auto discipline as the passthrough path: resolve entrypoints to
-	// the target alias before the upstream rewrite and routing loop.
-	r, decision := resolveAuto(r, payloadBytes, req.Model)
-	if decision != nil {
-		s.annotateQuota(decision)
-		req.Model = decision.TargetModel
-		if nb, err := rewriteModelField(payloadBytes, req.Model); err == nil {
-			payloadBytes = nb
-		}
-	}
-	// Same alias discipline as the passthrough path: providers only know
-	// their own model ids, so rewrite the converted payload's model field
-	// to the registered upstream id (no-op for 1:1 names).
-	if mapped := s.router.upstreamName(req.Model); mapped != "" && mapped != req.Model {
-		if nb, err := rewriteModelField(payloadBytes, mapped); err == nil {
-			payloadBytes = nb
-		}
-	}
-	s.forwardResponses(w, r, &req, payloadBytes)
+	// the target alias before the routing loop; the alias→upstream id
+	// rewrite is per picked candidate (design §10 item 2).
+	ar := s.planAuto(r)
+	r, req.Model, payloadBytes = ar.resolve(s, r, payloadBytes, req.Model)
+	s.forwardResponses(w, r, &req, payloadBytes, ar)
 }
 
 // forwardResponses routes the converted payload with the same
 // routing/quota/key-injection loop as the passthrough path, then converts
 // the upstream reply back to Responses format.
-func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, req *responsesRequest, payload []byte) {
+func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, req *responsesRequest, payload []byte, ar *autoRoute) {
 	start := time.Now()
 	const protocol = "openai"
 	attempted := 0
@@ -578,9 +565,13 @@ func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, req *r
 	var lastBody []byte
 	var lastRoute candidate
 	for {
-		route, release, st := s.router.acquire(r.Context(), req.Model, s.queueTimeout)
+		route, release, st := s.router.acquirePreferred(r.Context(), req.Model, s.queueTimeout, ar.preferProvider)
 		switch st {
 		case acquireNoCandidate:
+			if nb, nm, retry := ar.onNoCandidate(payload, req.Model); retry {
+				payload, req.Model = nb, nm
+				continue
+			}
 			if attempted == 0 && !s.router.known(req.Model) {
 				writeError(w, http.StatusNotFound, "no active key serves model "+req.Model)
 			} else if attempted == 0 {
@@ -641,8 +632,15 @@ func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, req *r
 				return false
 			}
 
+			// Per-candidate alias rewrite (design §10 item 2).
+			upPayload := payload
+			if route.upstream != "" && route.upstream != req.Model {
+				if nb, err := rewriteModelField(payload, route.upstream); err == nil {
+					upPayload = nb
+				}
+			}
 			upstreamURL := strings.TrimRight(route.baseURL, "/") + "/chat/completions"
-			upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(payload))
+			upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(upPayload))
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "build upstream request")
 				return false
@@ -669,6 +667,7 @@ func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, req *r
 				return true
 			}
 			s.router.success(route)
+			ar.onBind(s, route, req.Model)
 			s.deliverResponses(w, r.Context(), req, resp, route, start, protocol)
 			return false
 		}() {

@@ -379,3 +379,57 @@ tasks:
       run-log 2026-11-25T19:05 条目 + commit 26da33a；PR #9 标题/描述已注明
       M6-A 范围（M6-1/2/3 + glm-5.4[1m] 修正）与证据指引，CI check test 通过
       （run 45597198707），已 gh pr ready 9；不合并不部署，盯 review
+
+  - id: M6-B-1
+    milestone: M6-B
+    title: M6-4 缓存亲和（会话头识别 + 进程内绑定表 + TTL + 粘性/重绑代价入 Decide）
+    status: complete
+    acceptance: >
+      会话头优先级 x-claude-code-session-id > x-parent-session-id（父优先于子）>
+      x-session-id > session-id，值 ≥8 位 [\w-] 校验不过跳级；session →
+      (provider,key,model) 绑定表纯进程内存（永不持久化），TTL 默认 2h
+      （serve --affinity-ttl 可配透传）；绑定失效 = TTL 过期或目标不健康（冷却/
+      熔断/不再服务该模型，router.bindingHealthy 锁内快照）；粘性在 Decide 尾部
+      （绑定且健康 → 目标强制回绑定模型）；重绑代价 ContextChars/4 记 usage
+      cache_rebind_cost + matched_rule /rebind；能换 key 不换 provider 由
+      acquirePreferred（绑定 provider 优先其余兜底）保证；单测覆盖各会话头/
+      父子优先级/TTL 时钟注入/健康失效/provider 偏好/端到端粘性/重绑代价落库
+    evidence: >
+      run-log 2026-11-27T19:40 条目：internal/proxy/affinity.go + affinity_test.go
+      7 组（SessionIDPriority/TTLExpiry/HealthInvalidation/ProviderPreference/
+      StickyEndToEnd/RebindCostRecorded），internal/auto sticky/rebind 单测 2 组；
+      :8788 冒烟四请求（显式别名 via_manual=1 / auto+会话头绑定 glm-5.3-flash /
+      同会话第二请求 sticky session kept / thinking 请求 rebind 代价
+      cache_rebind_cost=8 落库）
+
+  - id: M6-B-2
+    milestone: M6-B
+    title: M6-5 router 改造（设计稿 §10 五项；别名改写回归测试先行）
+    status: complete
+    acceptance: >
+      ① cooldownState(model) 锁内只读快照（allCooling/soonest/breaker）；② 别名
+      改写沉到 pick 之后逐 candidate（candidate 携带该 provider 注册的 upstream，
+      废除前置 first-match；显式别名行为回归测试先行并证明旧实现下会失败）；③
+      auto 重判路径：目标别名全冷却 → ReDecide（deep/bg 永不重判；routine 在
+      Routine↔LongContextTarget 换目标）→ 改写 → 重 acquire，known() 的
+      404-vs-429 语义保持；④ gate 账户级并发 auto 不旁路（acquirePreferred 复用
+      同一 gate，集成测试验证排队）；⑤ M6-A 已达成复核项
+    evidence: >
+      run-log 2026-11-27T19:40 条目：router_m6b_test.go 4 组（AliasRewritePerCandidate
+      双 provider 双 upstream 改写各归各/全冷却 auto 重判到 glm-5.4[1m] 含 reason
+      /deep 全冷却不降档仍 429 且上游零接触/gate 满时 auto 排队 InFlight=1
+      Queued=1 后放行 200）；go test -count=1 全仓 10 包绿、-count=2（proxy+auto）
+      绿、-race 全仓绿、make lint 绿
+
+  - id: M6-B-3
+    milestone: M6-B
+    title: 验证与 PR #10（go test/-race/make lint 全绿、:8788 冒烟 + lsof 零外联、不合并不部署）
+    status: complete
+    acceptance: >
+      go test -count=1 ./... 全绿、-count=2 proxy+auto、-race 全绿、make lint 绿；
+      :8788 起临时实例（--quota-poll=false）冒烟，lsof 复核零对外连接；:8787
+      生产与 make deploy 全程不碰；PR 标题注明 M6-B，不合并不部署
+    evidence: >
+      run-log 2026-11-27T19:40 条目：全量验证绿；:8788 冒烟 lsof 仅有 127.0.0.1:8788
+      LISTEN 零外联；冒烟用假 key 验证后 security delete-generic-password 删除
+      （复核无残留）；沙箱 /tmp/av-m6b-smoke 已删；生产 :8787（pid 21604）未触碰

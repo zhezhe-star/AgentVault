@@ -41,6 +41,13 @@ type candidate struct {
 	// limit is the provider's account-level concurrency ceiling (0 =
 	// unlimited), carried along so the gate never needs a DB lookup.
 	limit int
+	// upstream is the provider-side model id registered for the requested
+	// alias under THIS provider. Carried so the body rewrite happens after
+	// pick, per candidate — the old pre-pick rewrite keyed on the alias
+	// name alone and silently took the first provider's mapping when one
+	// alias was registered under several providers with different
+	// upstream ids (design §10 item 2). "" = identity (1:1 name).
+	upstream string
 }
 
 // router picks upstreams among the active keys serving a model, rotating
@@ -107,7 +114,7 @@ func (r *router) candidates(model string) ([]candidate, error) {
 			if err != nil {
 				continue
 			}
-			out = append(out, candidate{providerID: m.ProviderID, keyID: k.ID, baseURL: p.BaseURL, anthropicBaseURL: p.AnthropicBaseURL, weight: k.Weight, limit: p.Concurrency})
+			out = append(out, candidate{providerID: m.ProviderID, keyID: k.ID, baseURL: p.BaseURL, anthropicBaseURL: p.AnthropicBaseURL, weight: k.Weight, limit: p.Concurrency, upstream: m.Upstream})
 		}
 	}
 	// Deterministic order: higher weight first, then key id as a stable tiebreak.
@@ -132,23 +139,6 @@ func (r *router) known(model string) bool {
 	}
 	cands, err := r.candidates(model)
 	return err == nil && len(cands) > 0
-}
-
-// upstreamName resolves the provider-side model id registered for a
-// requested alias ("claude-opus-4-5" -> "glm-5.4"). It returns "" when the
-// name is unknown or has no upstream mapping, so callers treat a non-empty,
-// differing result as "rewrite the request body".
-func (r *router) upstreamName(model string) string {
-	models, err := r.store.ListAllModels()
-	if err != nil {
-		return ""
-	}
-	for _, m := range models {
-		if m.Name == model && m.Upstream != "" {
-			return m.Upstream
-		}
-	}
-	return ""
 }
 
 // acquireStatus tells the caller how an acquire attempt ended; ok alone is
@@ -268,6 +258,129 @@ func (r *router) healthy(model string) ([]candidate, error) {
 func (r *router) pick(model string) (candidate, bool) {
 	c, _, st := r.acquire(context.Background(), model, time.Nanosecond)
 	return c, st == acquireOK
+}
+
+// acquirePreferred is acquire with a session-affinity provider preference
+// (design §8 能换 key 解决的不换 provider): the bound provider's candidates
+// are tried first, other providers remain available as fallback. An empty
+// preferred provider behaves exactly like acquire.
+func (r *router) acquirePreferred(ctx context.Context, model string, queueTimeout time.Duration, preferProvider string) (candidate, func(), acquireStatus) {
+	if preferProvider == "" {
+		return r.acquire(ctx, model, queueTimeout)
+	}
+	cands, err := r.healthy(model)
+	if err != nil || len(cands) == 0 {
+		return candidate{}, nil, acquireNoCandidate
+	}
+	r.mu.Lock()
+	last, seen := r.rr[model]
+	if !seen {
+		last = -1
+	}
+	start := (last + 1) % len(cands)
+	r.rr[model] = start
+	r.mu.Unlock()
+
+	ordered := make([]candidate, 0, len(cands))
+	for i := 0; i < len(cands); i++ {
+		ordered = append(ordered, cands[(start+i)%len(cands)])
+	}
+	var perProvider []candidate
+	seenProvider := map[string]bool{}
+	// Preferred provider first, then the rest in round-robin order.
+	for pass := 0; pass < 2; pass++ {
+		for _, c := range ordered {
+			if seenProvider[c.providerID] {
+				continue
+			}
+			preferred := c.providerID == preferProvider
+			if (pass == 0) != preferred {
+				continue
+			}
+			seenProvider[c.providerID] = true
+			perProvider = append(perProvider, c)
+		}
+	}
+
+	for _, c := range perProvider {
+		if r.gate.tryAcquire(c.providerID, c.limit) {
+			return c, r.releaser(c), acquireOK
+		}
+	}
+	c0 := perProvider[0]
+	if ctx.Err() != nil {
+		return candidate{}, nil, acquireCancelled
+	}
+	if !r.gate.acquire(ctx, c0.providerID, c0.limit, queueTimeout) {
+		if ctx.Err() != nil {
+			return candidate{}, nil, acquireCancelled
+		}
+		return candidate{}, nil, acquireQueuedTimeout
+	}
+	return c0, r.releaser(c0), acquireOK
+}
+
+// bindingHealthy reports whether a session-affinity target is still
+// usable: the model must still be served and the exact key must not be
+// cooling down or breaker-open (design §8 绑定失效条件). A single lock-held
+// snapshot — no map reads outside the router lock.
+func (r *router) bindingHealthy(model, providerID, keyID string) bool {
+	cands, err := r.candidates(model)
+	if err != nil {
+		return false
+	}
+	serves := false
+	for _, c := range cands {
+		if c.providerID == providerID && c.keyID == keyID {
+			serves = true
+		}
+	}
+	if !serves {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	id := providerID + "/" + keyID
+	if until, hot := r.cooldowns[id]; hot && time.Now().Before(until) {
+		return false
+	}
+	return true
+}
+
+// cooldownState is a lock-held snapshot of a model's key health for the
+// auto re-decision path (design §10 item 1: read-only, never bypasses the
+// lock). allCooling means acquire would immediately find no candidate;
+// soonest is how long until the first key rejoins (0 when nothing cools).
+type cooldownState struct {
+	allCooling bool
+	soonest    time.Duration
+	breaker    bool // at least one open breaker among the cooling keys
+}
+
+func (r *router) cooldownState(model string) cooldownState {
+	cands, err := r.candidates(model)
+	if err != nil {
+		return cooldownState{}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now()
+	st := cooldownState{allCooling: len(cands) > 0}
+	for _, c := range cands {
+		until, hot := r.cooldowns[c.providerID+"/"+c.keyID]
+		if hot && now.Before(until) {
+			d := until.Sub(now)
+			if st.soonest == 0 || d < st.soonest {
+				st.soonest = d
+			}
+			if r.breaker[c.providerID+"/"+c.keyID] {
+				st.breaker = true
+			}
+		} else {
+			st.allCooling = false
+		}
+	}
+	return st
 }
 
 // gateStats snapshots per-provider in-flight/queued counts for observation.

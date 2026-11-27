@@ -68,6 +68,11 @@ type Request struct {
 	Tools        int    // number of tools attached (0 = plain text)
 	MaxTokens    int    // requested output cap (weak signal)
 	ContextChars int    // rough input size in characters (weak signal)
+	// BoundModel is the model a healthy session binding currently points
+	// at (cache affinity, design §8; the proxy fills it after a health
+	// check). Decide prefers staying on it — switching models drops the
+	// session's prefix cache, priced by CacheRebindCost below.
+	BoundModel string
 }
 
 // Rule is one row of the classification table: ordered, first match wins.
@@ -182,8 +187,9 @@ type Decision struct {
 	TargetModel   string
 	MatchedRule   string
 	Reason        string
-	PinnedTier    bool // entrypoint pinned the tier; classification skipped
-	NeedsOverflow bool // always false in M6-A (overflow is M6-6, owner-gated)
+	PinnedTier    bool  // entrypoint pinned the tier; classification skipped
+	NeedsOverflow bool  // always false in M6-A (overflow is M6-6, owner-gated)
+	CacheRebind   int64 // est. context tokens whose prefix cache is lost (0 = sticky)
 }
 
 // Decide maps an entrypoint request onto a target model. Pinned
@@ -213,7 +219,46 @@ func Decide(entrypoint string, req Request, rules []Rule, targets Targets) Decis
 		d.MatchedRule += "/long-context"
 		d.Reason += "; oversized context routed to " + targets.LongContextTarget
 	}
+	// Cache affinity (design §8): a healthy session binding keeps the
+	// request on its current model — "跳过重选". Staying put preserves the
+	// session's upstream prefix cache; drifting to the table's fresh pick
+	// prices the loss into the decision (能调参解决的不换模型: the bound
+	// model still serves the tier, so we keep it).
+	if req.BoundModel != "" && req.BoundModel != d.TargetModel {
+		d.CacheRebind = int64(contextTokens(req))
+		d.MatchedRule += "/rebind"
+		d.Reason += fmt.Sprintf("; cache rebind from %s (est. %d cached tokens lost)",
+			req.BoundModel, d.CacheRebind)
+		d.TargetModel = req.BoundModel
+	} else if req.BoundModel == d.TargetModel {
+		d.Reason += "; sticky session kept " + d.TargetModel
+	}
 	return d
+}
+
+// ReDecide is the auto re-decision path (design §10 item 3): the target
+// alias just failed to pick because every serving key is cooling down.
+// Deep never re-routes (blacklist: no downgrade, wait or 429); background
+// has a single in-plan target; routine may fall back between its base
+// alias and the long-context variant when both are registered. The bool
+// reports whether an alternative exists; the caller rewrites and re-picks
+// only then, preserving known()'s 404-vs-429 semantics for whatever it
+// still cannot serve.
+func ReDecide(d Decision, targets Targets, unavailable string) (Decision, bool) {
+	if d.Tier == TierDeep || d.Tier == TierBackground {
+		return d, false
+	}
+	alts := []string{targets.Routine, targets.LongContextTarget}
+	for _, alt := range alts {
+		if alt == "" || alt == unavailable || alt == d.TargetModel {
+			continue
+		}
+		d.TargetModel = alt
+		d.MatchedRule += "/redecide"
+		d.Reason += fmt.Sprintf("; %s all keys cooling, re-decided to %s", unavailable, alt)
+		return d, true
+	}
+	return d, false
 }
 
 // Quota bands for the GLM plan usage percentage (design §5 step 4).
