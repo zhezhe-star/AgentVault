@@ -49,6 +49,9 @@ func serveCmd() *cobra.Command {
 	var quotaProvider string
 	var deepseekProvider string
 	var affinityTTL time.Duration
+	var eventsPath string
+	var offpeakConfig string
+	var offpeakFactor float64
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Start the local proxy and control-plane console (loopback only)",
@@ -56,9 +59,15 @@ func serveCmd() *cobra.Command {
 			if queueTimeout < 0 {
 				return fmt.Errorf("--queue-timeout must be non-negative")
 			}
+			if offpeakFactor < 1 {
+				return fmt.Errorf("--offpeak-concurrency-factor must be >= 1")
+			}
 			cfg, err := app.Resolve()
 			if err != nil {
 				return err
+			}
+			if eventsPath == "" {
+				eventsPath = auto.DefaultEventPath(cfg.DataDir)
 			}
 			opts := serveOptions{
 				QueueTimeout:     queueTimeout,
@@ -66,6 +75,9 @@ func serveCmd() *cobra.Command {
 				QuotaProvider:    quotaProvider,
 				DeepSeekProvider: deepseekProvider,
 				AffinityTTL:      affinityTTL,
+				EventsPath:       eventsPath,
+				OffPeakConfig:    offpeakConfig,
+				OffPeakFactor:    offpeakFactor,
 			}
 			if daemon {
 				return spawnDaemon(cfg, addr, opts)
@@ -85,6 +97,12 @@ func serveCmd() *cobra.Command {
 		"provider id whose first active key authenticates the DeepSeek balance probe")
 	cmd.Flags().DurationVar(&affinityTTL, "affinity-ttl", proxy.DefaultAffinityTTL,
 		"session cache-affinity binding TTL (e.g. 2h); 0 resets to the default")
+	cmd.Flags().StringVar(&eventsPath, "events-path", "",
+		"owner-decision event file (JSONL, metadata only); default <data-dir>/auto-events.jsonl")
+	cmd.Flags().StringVar(&offpeakConfig, "offpeak-config", "",
+		"off-peak window config JSON ({\"glm\":…,\"deepseek\":…}); default built-in §9 windows")
+	cmd.Flags().Float64Var(&offpeakFactor, "offpeak-concurrency-factor", 1.5,
+		"GLM gate limit multiplier inside the GLM off-peak window (>=1, 1 disables)")
 	return cmd
 }
 
@@ -95,6 +113,9 @@ type serveOptions struct {
 	QuotaProvider    string
 	DeepSeekProvider string
 	AffinityTTL      time.Duration
+	EventsPath       string
+	OffPeakConfig    string
+	OffPeakFactor    float64
 }
 
 func (o serveOptions) execArgs(addr string) []string {
@@ -103,7 +124,10 @@ func (o serveOptions) execArgs(addr string) []string {
 		"--quota-poll=" + strconv.FormatBool(o.QuotaPoll),
 		"--quota-provider", o.QuotaProvider,
 		"--deepseek-provider", o.DeepSeekProvider,
-		"--affinity-ttl", o.AffinityTTL.String()}
+		"--affinity-ttl", o.AffinityTTL.String(),
+		"--events-path", o.EventsPath,
+		"--offpeak-config", o.OffPeakConfig,
+		"--offpeak-concurrency-factor", strconv.FormatFloat(o.OffPeakFactor, 'f', -1, 64)}
 }
 
 // spawnDaemon re-executes this binary with --daemon detached, writing the
@@ -150,6 +174,27 @@ func runProxy(cfg app.Config, addr string, opts serveOptions) error {
 	proxySrv.SetQueueTimeout(opts.QueueTimeout)
 	if opts.AffinityTTL > 0 {
 		proxySrv.SetAffinityTTL(opts.AffinityTTL)
+	}
+	// Owner decision channel (M6-6 §7): event file for the notification
+	// face, overflow provider for availability gating. A bad off-peak
+	// config fail-safes to standard-tier (no relaxation, no marking) —
+	// startup continues, the reason lands in the decision annotation only
+	// where it matters: nowhere. Log-free per the no-secret discipline.
+	proxySrv.SetEventLog(auto.NewEventLog(opts.EventsPath))
+	proxySrv.SetDeepSeekProvider(opts.DeepSeekProvider)
+	glmPeak, dsPeak, err := auto.LoadOffPeakConfig(opts.OffPeakConfig)
+	if err != nil {
+		glmPeak, dsPeak = auto.PeakWindows{}, auto.PeakWindows{}
+	}
+	proxySrv.SetOffPeakWindows(glmPeak, dsPeak)
+	glmProvider := opts.QuotaProvider
+	if opts.OffPeakFactor > 1 {
+		proxySrv.SetOffPeakBoost(func(providerID string, limit int) int {
+			if limit <= 0 || providerID != glmProvider || !proxySrv.GLMOffPeak() {
+				return limit
+			}
+			return int(float64(limit) * opts.OffPeakFactor)
+		})
 	}
 	proxySrv.EnableUsage(usageStore)
 	proxySrv.EnableQuotas(store, usageStore)

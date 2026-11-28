@@ -122,6 +122,24 @@ var migrations = []string{
 		verified_at  TEXT NOT NULL,
 		PRIMARY KEY (provider, plan_tier, window_type)
 	)`,
+	// Migration 8: owner decision channel (auto mode M6-6, design
+	// docs/design/auto-mode.md §7). One row per overflow candidate awaiting
+	// the owner's approve/deny. Metadata only — the request body and the
+	// provider key never enter this table (structural no-secret rule).
+	`CREATE TABLE pending_decision (
+		id           INTEGER PRIMARY KEY AUTOINCREMENT,
+		provider     TEXT NOT NULL,
+		model        TEXT NOT NULL,
+		task_tier    TEXT NOT NULL,
+		matched_rule TEXT NOT NULL DEFAULT '',
+		reason       TEXT NOT NULL DEFAULT '',
+		est_tokens   INTEGER NOT NULL DEFAULT 0,
+		est_cost     REAL NOT NULL DEFAULT 0,
+		status       TEXT NOT NULL DEFAULT 'pending',
+		created_at   TEXT NOT NULL,
+		decided_at   TEXT NOT NULL DEFAULT ''
+	)`,
+	`CREATE INDEX idx_pending_status ON pending_decision(status)`,
 }
 
 // Store wraps the SQLite database.

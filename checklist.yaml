@@ -433,3 +433,53 @@ tasks:
       run-log 2026-11-27T19:40 条目：全量验证绿；:8788 冒烟 lsof 仅有 127.0.0.1:8788
       LISTEN 零外联；冒烟用假 key 验证后 security delete-generic-password 删除
       （复核无残留）；沙箱 /tmp/av-m6b-smoke 已删；生产 :8787（pid 21604）未触碰
+
+  - id: M6-C-1
+    milestone: M6-C
+    title: M6-6 owner 决策通道（pending_decision 表 + 溢出候选 filing + CLI/事件/Console 三面；e239 无自动溢出）
+    status: complete
+    acceptance: >
+      migration 8 只追加 pending_decision；溢出候选按软档（elevated 仅 bg、
+      critical bg+routine、deep 永不）触发，deepseek 可用性门控，pending 去重，
+      未决请求照常走 GLM（e239）；CLI auto pending/approve/deny；事件文件
+      （元数据 only）追加写；Console API + 卡片；deepseek 不可用降级 reason 注记
+    evidence: >
+      pending_test.go 全链路（创建默认态/decide 单向/NotFound/DecideAll/去重四
+      分类/决后释放）+ auto_m6c_test.go TestOverflowCandidateFiling（filing 含
+      事件文件断言与禁含 key/body、二次请求去重、决策后类释放、deep 永不落
+      pending）+ TestOverflowBandEligibility 4 组（routine@elevated 不出/
+      routine@critical 出/healthy 不出/deepseek 无行 suppressed 注记 + probe
+      反证不出）+ TestCLIAutoDecisionFlow（pending/approve/pending --all/deny
+      all/事件文件元数据 only）
+  - id: M6-C-2
+    milestone: M6-C
+    title: M6-7 错峰窗口（LiteLLM 风格配置 + fail-safe + off_peak 落库 + 闲时并发放宽）
+    status: complete
+    acceptance: >
+      hours_utc 多窗口/跨午夜/IANA 时区/weekday；配置错配 fail-safe 回标准档
+      （Start==End parse 拒绝）；内置 GLM/DeepSeek 默认窗（含周末闲时）；
+      off_peak 落 usage；GLM 闲时 gate effective limit × factor（默认 1.5）
+    evidence: >
+      offpeak_test.go（跨午夜 22-2 边界/9-9 拒绝/weekday 选中/IANA 时区换算含
+      13:59-14:01 与 18:00 边界/parse 错误族/空表恒 peak/默认窗边界与周末/
+      LoadOffPeakConfig 缺失=默认、坏 JSON=错、有效覆盖仅换 provider）+
+      TestOffPeakUsageStamp（off_peak=true + reason off-peak window）+
+      TestOffPeakBoostEffectiveLimit（无钩子原值/1.5 放大/异 provider 不放大/
+      unlimited 恒 0）
+  - id: M6-C-3
+    milestone: M6-C
+    title: M6-8 观测面 + 验证与 PR #11（三响应头 + /admin auto 面板 + 全量绿 + :8788 冒烟 + lsof 零外联、不合并不部署）
+    status: complete
+    acceptance: >
+      x-agentvault-route/decision/off-peak 三头（显式别名仅 route）；/admin/routing
+      auto 面板；go test -count=1 ./...、-count=2、-race、make lint 全绿；
+      :8788 冒烟 --quota-poll=false，lsof 零对外；:8787 与 make deploy 不碰
+    evidence: >
+      TestObservabilityHeaders（三头断言 + 显式别名仅 route 回归）+
+      TestRoutingAutoPanel（background=2/candidates>=1/pending=1）+
+      TestConsolePendingAPI（GET 列表/POST deny by id/坏 body 400）；run-log
+      2026-11-28 冒烟条目：:8788 真机五段（显式别名 route 头/96% 灌档
+      suppressed 注记→补 deepseek 行后 filing+事件+CLI/dedupe/admin 面板
+      {bg:4,candidates:1,pending:1}/console deny+approve all），lsof 仅
+      127.0.0.1:8788 LISTEN 零外联，:8787（pid 14169）未触碰、未 make deploy；
+      假 key 已 security delete-generic-password（复核无残留）、沙箱已删

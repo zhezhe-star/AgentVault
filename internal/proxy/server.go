@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zhezhe-star/AgentVault/internal/app"
@@ -68,7 +69,167 @@ type Server struct {
 	// affinity is the in-memory session → (provider, key, model) binding
 	// table for cache affinity (design §8); nil = disabled (tests).
 	affinity *sessionAffinity
+	// events is the owner-decision notification face (design §7); nil or
+	// empty path disables writing.
+	events *auto.EventLog
+	// deepSeekProviderID names the overflow provider row consulted for
+	// availability before filing an overflow candidate (design §7); ""
+	// disables filing.
+	deepSeekProviderID string
+	// glmPeak / dsPeak are the off-peak schedules (design §9). glmPeak
+	// drives request marking and the concurrency relaxation; dsPeak is
+	// kept for the DeepSeek side of the schedule (used by the console /
+	// future deferred-task queue). nil windows = off-peak disabled.
+	glmPeak, dsPeak auto.PeakWindows
+	// offPeakBoost computes the effective gate limit for a provider during
+	// its off-peak window (design §9 闲时放宽); nil = no relaxation. It
+	// returns the possibly-raised limit (0 keeps "unlimited").
+	offPeakBoost func(providerID string, limit int) int
+	// autoStats counts per-tier auto requests and overflow candidates for
+	// the /admin/routing auto panel (design §11).
+	statMu             sync.Mutex
+	tierRequests       map[auto.Tier]int64
+	overflowCandidates int64
 }
+
+// SetEventLog installs the owner-decision event file (design §7; nil
+// disables notification writes).
+func (s *Server) SetEventLog(l *auto.EventLog) { s.events = l }
+
+// SetDeepSeekProvider names the overflow provider id whose vault row and
+// availability gate overflow-candidate filing (design §7).
+func (s *Server) SetDeepSeekProvider(id string) { s.deepSeekProviderID = id }
+
+// SetOffPeakWindows installs the off-peak schedules (design §9). nil
+// windows disable off-peak marking and relaxation entirely.
+func (s *Server) SetOffPeakWindows(glm, ds auto.PeakWindows) {
+	s.glmPeak, s.dsPeak = glm, ds
+}
+
+// SetOffPeakBoost installs the concurrency-relaxation hook (design §9 闲
+// 时放宽); the router consults it per pick. nil = no relaxation.
+func (s *Server) SetOffPeakBoost(fn func(providerID string, limit int) int) {
+	s.offPeakBoost = fn
+	s.router.setOffPeakBoost(fn)
+}
+
+// glmOffPeak reports whether now is inside the GLM off-peak window
+// (nil windows = never off-peak, the standard-tier fail-safe).
+// GLMOffPeak is the exported flavor for serve wiring (the off-peak
+// concurrency-boost closure reads it per pick).
+func (s *Server) GLMOffPeak() bool { return s.glmOffPeak() }
+
+func (s *Server) glmOffPeak() bool {
+	if s.glmPeak.Windows == nil && s.glmPeak.Loc == nil {
+		return false
+	}
+	return s.glmPeak.IsOffPeak(time.Now())
+}
+
+// deepSeekUsable reports whether the overflow target (design §7) could
+// actually serve today: a vault provider row with an active key, and (when
+// a probe result exists) a positive is_available. Unavailability degrades
+// overflow filing to a decision-reason note — never a pending row.
+func (s *Server) deepSeekUsable() bool {
+	if s.deepSeekProviderID == "" {
+		return false
+	}
+	if _, err := s.store.GetProvider(s.deepSeekProviderID); err != nil {
+		return false
+	}
+	keys, err := s.store.ListKeys(s.deepSeekProviderID)
+	if err != nil {
+		return false
+	}
+	active := false
+	for _, k := range keys {
+		if k.Status == provider.KeyActive {
+			active = true
+		}
+	}
+	if !active {
+		return false
+	}
+	if s.deepSeekStatus != nil {
+		if st, ok := s.deepSeekStatus(); ok && !st.Available {
+			return false
+		}
+	}
+	return true
+}
+
+// resolveOverflow implements design §7 / §5a: when the soft quota band
+// makes this tier an overflow candidate (70–95% background, >95%
+// background+routine, deep never) AND DeepSeek is usable, file one
+// pending_decision (deduped per open candidate class) and notify via the
+// event file. The request itself NEVER overflows (e239): an unresolved
+// pending just means the request rides GLM's normal path. DeepSeek being
+// unusable degrades the candidate to a reason note. Every failure here
+// degrades — filing must never take a request down.
+func (s *Server) resolveOverflow(d *auto.Decision, features auto.Request, entrypoint string) {
+	if d == nil || !s.glmOverflowCandidate(d) {
+		return
+	}
+	target := auto.DefaultOverflowTarget()
+	if !s.deepSeekUsable() {
+		d.Reason += "; overflow candidate suppressed: deepseek unavailable"
+		return
+	}
+	open, err := s.store.HasOpenPending(string(d.Tier), target.Provider, target.Model)
+	if err != nil || open {
+		if err == nil {
+			d.Reason += "; overflow candidate open (awaiting owner)"
+		}
+		return
+	}
+	estTokens := int64(features.ContextChars / 4)
+	estCost := float64(estTokens) / 1e6 * deepSeekInputPricePerM
+	id, err := s.store.CreatePendingDecision(provider.PendingDecision{
+		Provider: target.Provider, Model: target.Model,
+		TaskTier: string(d.Tier), MatchedRule: d.MatchedRule,
+		Reason: fmt.Sprintf("quota band %s on entrypoint %s; owner approval required before any DeepSeek switch (design §5a)",
+			quotaBandOf(s.quotaUsedPct), entrypoint),
+		EstTokens: estTokens, EstCost: estCost,
+	})
+	if err != nil {
+		d.Reason += "; overflow candidate filing failed (request continues on GLM)"
+		return
+	}
+	s.statMu.Lock()
+	s.overflowCandidates++
+	s.statMu.Unlock()
+	d.NeedsOverflow = true
+	d.MatchedRule += "/overflow-candidate"
+	d.Reason += fmt.Sprintf("; overflow candidate filed (pending #%d, awaiting owner)", id)
+	_ = s.events.Append(auto.Event{
+		Type: auto.EventPendingCreated, ID: id, Tier: string(d.Tier),
+		Provider: target.Provider, Model: target.Model,
+		EstTokens: estTokens, EstCost: estCost,
+	})
+}
+
+// glmOverflowCandidate applies the §5 step-4 soft bands. Requires an
+// installed quota source: unknown quota never files candidates.
+func (s *Server) glmOverflowCandidate(d *auto.Decision) bool {
+	if s.quotaUsedPct == nil {
+		return false
+	}
+	return auto.OverflowEligible(d.Tier, auto.QuotaBand(s.quotaUsedPct()))
+}
+
+// quotaBandOf converts a quota-source func into its band name ("" unknown).
+func quotaBandOf(fn func() float64) string {
+	if fn == nil {
+		return ""
+	}
+	return auto.QuotaBand(fn())
+}
+
+// deepSeekInputPricePerM is the rough per-million-input-token figure used
+// for the pending decision's display-only cost estimate (design §7 预估成
+// 本). Deliberately conservative and documented as an estimate — never
+// billing data.
+const deepSeekInputPricePerM = 0.27
 
 // SetQuotaSource installs the plan-usage reader consulted by the auto
 // decision layer (design §5 step 4: the band only annotates the reason —
@@ -154,27 +315,29 @@ type autoDecisionKey struct{}
 // The rules table is always the defaults in M6-A: quota awareness and
 // owner-confirmed overflow arrive with M6-3/M6-6, so Decide only picks the
 // in-plan GLM target.
-func resolveAuto(r *http.Request, body []byte, model, boundModel string) (*http.Request, *auto.Decision) {
+func resolveAuto(r *http.Request, body []byte, model, boundModel string) (*http.Request, *auto.Decision, auto.Request) {
 	if !auto.IsEntrypoint(model) {
 		// Explicit alias = the escape hatch (design §3a): forward as-is,
 		// tag the usage record via_manual.
-		return r.WithContext(context.WithValue(r.Context(), autoDecisionKey{}, &auto.Decision{MatchedRule: "explicit-alias"})), nil
+		return r.WithContext(context.WithValue(r.Context(), autoDecisionKey{}, &auto.Decision{MatchedRule: "explicit-alias"})), nil, auto.Request{}
 	}
 	features := auto.ExtractFeatures(body, model)
 	features.BoundModel = boundModel
 	d := auto.Decide(model, features, nil, auto.DefaultTargets())
-	return r.WithContext(context.WithValue(r.Context(), autoDecisionKey{}, &d)), &d
+	return r.WithContext(context.WithValue(r.Context(), autoDecisionKey{}, &d)), &d, features
 }
 
 // autoRoute carries the per-request routing context shared by the
 // passthrough and Responses loops: the session id, an affinity provider
-// preference, the auto decision (nil for explicit aliases) and whether the
+// preference, the auto decision (nil for explicit aliases), the extracted
+// features (for the overflow candidate's cost estimate) and whether the
 // §10-3 re-decision path already ran.
 type autoRoute struct {
 	session        string
 	bound          affinityBinding
 	preferProvider string
 	decision       *auto.Decision
+	features       auto.Request
 	redecided      bool
 }
 
@@ -196,20 +359,51 @@ func (s *Server) planAuto(r *http.Request) *autoRoute {
 	return ar
 }
 
-// resolve applies the decision to the request: quota annotation, target
-// model rewrite. Returns the new body (or the original when the decision
-// is nil / the rewrite is a no-op).
+// resolve applies the decision to the request: off-peak marking, quota
+// annotation, overflow-candidate filing, target model rewrite, auto-panel
+// counters. Returns the new body (or the original when the decision is
+// nil / the rewrite is a no-op).
 func (ar *autoRoute) resolve(s *Server, r *http.Request, body []byte, model string) (*http.Request, string, []byte) {
-	r, decision := resolveAuto(r, body, model, ar.bound.model)
+	r, decision, features := resolveAuto(r, body, model, ar.bound.model)
 	ar.decision = decision
+	ar.features = features
 	if decision != nil {
-		s.annotateQuota(decision)
+		if auto.IsEntrypoint(model) {
+			s.statMu.Lock()
+			s.tierRequests[decision.Tier]++
+			s.statMu.Unlock()
+			// Off-peak marking (design §9): GLM windows only — v1 traffic
+			// stays in-plan on GLM, so the DeepSeek schedule is recorded
+			// but not consulted here.
+			if s.glmOffPeak() {
+				decision.OffPeak = true
+				decision.Reason += "; off-peak window"
+			}
+			s.annotateQuota(decision)
+			s.resolveOverflow(decision, features, model)
+		}
 		model = decision.TargetModel
 		if nb, err := rewriteModelField(body, model); err == nil {
 			body = nb
 		}
 	}
 	return r, model, body
+}
+
+// stampHeaders sets the observability response headers (design §11):
+// x-agentvault-route (actual provider/model), x-agentvault-decision (tier
+// + rule abbreviation) and x-agentvault-off-peak. Auto decisions carry all
+// three; explicit aliases only the route header. Must run before
+// WriteHeader.
+func (ar *autoRoute) stampHeaders(w http.ResponseWriter, route candidate, model string) {
+	w.Header().Set("x-agentvault-route", route.providerID+"/"+model)
+	if ar.decision == nil {
+		return
+	}
+	w.Header().Set("x-agentvault-decision", string(ar.decision.Tier)+":"+ar.decision.MatchedRule)
+	if auto.IsEntrypoint(ar.decision.Entrypoint) {
+		w.Header().Set("x-agentvault-off-peak", strconv.FormatBool(ar.decision.OffPeak))
+	}
 }
 
 // onNoCandidate handles the auto re-decision path (design §10 item 3):
@@ -262,6 +456,7 @@ func (s *Server) recordUsageCtx(ctx context.Context, r usage.Record) {
 		r.MatchedRule = d.MatchedRule
 		r.DecisionReason = d.Reason
 		r.CacheRebindCost = d.CacheRebind
+		r.OffPeak = d.OffPeak
 		if d.MatchedRule == "explicit-alias" {
 			r.ViaManual = true
 		}
@@ -283,6 +478,7 @@ func New(store *provider.Store, sec secret.Store, service string) *Server {
 		queueTimeout: DefaultQueueTimeout,
 	}
 	s.affinity = newSessionAffinity(s.router, DefaultAffinityTTL)
+	s.tierRequests = map[auto.Tier]int64{}
 	s.mux.HandleFunc("/v1/chat/completions", s.handleChat)
 	s.mux.HandleFunc("/v1/responses", s.handleResponses)
 	s.mux.HandleFunc("/v1/messages", s.handleMessages)
@@ -612,6 +808,7 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, wireFlavor wire
 			}
 			s.router.success(route)
 			ar.onBind(s, route, req.Model)
+			ar.stampHeaders(w, route, req.Model)
 
 			// Copy upstream response headers and stream the body through (SSE
 			// transparently included: no buffering beyond header flush). A
@@ -721,12 +918,29 @@ func (s *Server) handleRoutingStatus(w http.ResponseWriter, _ *http.Request) {
 		Queued   int    `json:"queued"`
 	}
 	gstats := s.router.gateStats()
+	// Auto panel (design §11): per-tier request counts, overflow candidates
+	// filed and the open pending count. Store errors degrade to 0 — the
+	// panel is observation, never a request path.
+	s.statMu.Lock()
+	tiers := map[string]int64{}
+	for t, n := range s.tierRequests {
+		tiers[string(t)] = n
+	}
+	candidates := s.overflowCandidates
+	s.statMu.Unlock()
+	pending, _ := s.store.CountOpenPending()
 	out := struct {
 		CoolingKeys       int              `json:"cooling_keys"`
 		BreakerKeys       int              `json:"breaker_keys"`
 		DeepSeekAvailable *bool            `json:"deepseek_available,omitempty"`
+		Auto              map[string]any   `json:"auto"`
 		Providers         []providerStatus `json:"providers"`
 	}{CoolingKeys: s.router.coolingCount(), BreakerKeys: s.router.breakerCount()}
+	out.Auto = map[string]any{
+		"requests":            tiers,
+		"overflow_candidates": candidates,
+		"pending":             pending,
+	}
 	if s.deepSeekStatus != nil {
 		if st, ok := s.deepSeekStatus(); ok {
 			out.DeepSeekAvailable = &st.Available

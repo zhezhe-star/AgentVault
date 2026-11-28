@@ -21,7 +21,41 @@
 <h1>AgentVault 控制台</h1>
 <p>Provider → Key → 模型 三级视图（数据来自本地库，token 用量自 M3 起累计）</p>
 <div id="overview"><span class="empty">加载中…</span></div>
+<h2>待决策溢出候选</h2>
+<p>auto 模式下配额进入高档/危急档产生的 DeepSeek 溢出候选（切换前需 owner 批准，设计稿 §7）</p>
+<div id="pending"><span class="empty">加载中…</span></div>
 <script>
+async function decide(id, decision) {
+  await fetch('/console/api/pending', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, decision })
+  });
+  loadPending();
+}
+async function loadPending() {
+  const el = document.getElementById('pending');
+  try {
+    const res = await fetch('/console/api/pending');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    const list = data.pending || [];
+    if (list.length === 0) {
+      el.innerHTML = '<span class="empty">无待决策候选</span>';
+      return;
+    }
+    el.innerHTML = list.map(d => `
+      <div class="provider">
+        <strong>#${d.id}</strong> [${d.status}] 档位=${d.task_tier} 目标=${d.provider}/${d.model}
+        预估 ~${d.est_tokens} tok (~$${d.est_cost.toFixed(4)})
+        <div class="ref">${(d.matched_rule || '') + ' — ' + (d.reason || '')}</div>
+        <button onclick="decide(${d.id}, 'approve')">批准</button>
+        <button onclick="decide(${d.id}, 'deny')">拒绝</button>
+      </div>`).join('');
+  } catch (e) {
+    el.innerHTML = '<span class="status-revoked">加载失败：' + e.message + '</span>';
+  }
+}
 async function load() {
   const el = document.getElementById('overview');
   try {
@@ -54,6 +88,7 @@ async function load() {
   }
 }
 load();
+loadPending();
 </script>
 </body>
 </html>

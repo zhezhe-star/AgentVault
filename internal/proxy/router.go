@@ -69,6 +69,10 @@ type router struct {
 	rr map[string]int
 	// gate enforces the per-provider account-level concurrency ceiling.
 	gate *gate
+	// offPeakBoost optionally raises a provider's effective limit during
+	// its off-peak window (design §9 闲时放宽). It receives the registered
+	// limit and returns the possibly-raised effective one. nil = off.
+	offPeakBoost func(providerID string, limit int) int
 }
 
 func newRouter(store *provider.Store, cooldown time.Duration) *router {
@@ -204,7 +208,7 @@ func (r *router) acquire(ctx context.Context, model string, queueTimeout time.Du
 	}
 
 	for _, c := range perProvider {
-		if r.gate.tryAcquire(c.providerID, c.limit) {
+		if r.gate.tryAcquire(c.providerID, r.effectiveLimit(c)) {
 			return c, r.releaser(c), acquireOK
 		}
 	}
@@ -215,7 +219,7 @@ func (r *router) acquire(ctx context.Context, model string, queueTimeout time.Du
 	if ctx.Err() != nil {
 		return candidate{}, nil, acquireCancelled
 	}
-	if !r.gate.acquire(ctx, c0.providerID, c0.limit, queueTimeout) {
+	if !r.gate.acquire(ctx, c0.providerID, r.effectiveLimit(c0), queueTimeout) {
 		if ctx.Err() != nil {
 			return candidate{}, nil, acquireCancelled
 		}
@@ -226,6 +230,34 @@ func (r *router) acquire(ctx context.Context, model string, queueTimeout time.Du
 
 func (r *router) releaser(c candidate) func() {
 	return func() { r.gate.release(c.providerID) }
+}
+
+// setOffPeakBoost installs the off-peak concurrency-relaxation hook
+// (design §9); the effective limit is computed per pick so the window
+// opens and closes without touching the gate.
+func (r *router) setOffPeakBoost(fn func(providerID string, limit int) int) {
+	r.mu.Lock()
+	r.offPeakBoost = fn
+	r.mu.Unlock()
+}
+
+// effectiveLimit resolves a candidate's admission limit, applying the
+// off-peak relaxation when installed. 0 (unlimited) passes through
+// untouched.
+func (r *router) effectiveLimit(c candidate) int {
+	if c.limit <= 0 {
+		return 0
+	}
+	r.mu.Lock()
+	fn := r.offPeakBoost
+	r.mu.Unlock()
+	if fn == nil {
+		return c.limit
+	}
+	if raised := fn(c.providerID, c.limit); raised > 0 {
+		return raised
+	}
+	return c.limit
 }
 
 // healthy returns the candidates that are not cooling down, in the stable
@@ -303,7 +335,7 @@ func (r *router) acquirePreferred(ctx context.Context, model string, queueTimeou
 	}
 
 	for _, c := range perProvider {
-		if r.gate.tryAcquire(c.providerID, c.limit) {
+		if r.gate.tryAcquire(c.providerID, r.effectiveLimit(c)) {
 			return c, r.releaser(c), acquireOK
 		}
 	}
@@ -311,7 +343,7 @@ func (r *router) acquirePreferred(ctx context.Context, model string, queueTimeou
 	if ctx.Err() != nil {
 		return candidate{}, nil, acquireCancelled
 	}
-	if !r.gate.acquire(ctx, c0.providerID, c0.limit, queueTimeout) {
+	if !r.gate.acquire(ctx, c0.providerID, r.effectiveLimit(c0), queueTimeout) {
 		if ctx.Err() != nil {
 			return candidate{}, nil, acquireCancelled
 		}
