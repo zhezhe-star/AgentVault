@@ -170,3 +170,23 @@ shell rc 注释化）、`agentvault run` 环境变量注入（MCP/工具凭据�
 
 实施纪律：devflow 三件套照旧；每步 lint+tests 绿；:8788 dev 端口先验；显式别名
 直通行为回归不变；部署上线前过决策节点。
+
+### M6-B 实施注记（2026-11-27）
+
+- **M6-4 缓存亲和**：会话头优先级 x-claude-code-session-id > x-parent-session-id
+  （父优先于子）> x-session-id > session-id，值须 ≥8 位 `[\w-]` 否则跳过该级；
+  session → (provider, key, model) 绑定表纯进程内存（永不持久化），TTL 默认 2h
+  （serve `--affinity-ttl` 可配，daemon 透传）；绑定失效条件 = TTL 过期 或 目标
+  不健康（key 冷却/熔断或不再服务该模型）；粘性在 Decide 尾部生效（绑定且健康
+  → 目标强制回绑定模型，reason 标 "sticky session kept"），重绑代价 = 估算丢失
+  前缀缓存 tokens（ContextChars/4），记 usage `cache_rebind_cost` 并标
+  matched_rule `/rebind`；能换 key 解决的不换 provider 由 router.acquirePreferred
+  （绑定 provider 优先、其余 provider 兜底）保证。
+- **M6-5 router 五项**：① cooldownState(model) 锁内只读快照（allCooling/soonest/
+  breaker）；② 别名改写沉到 pick 之后逐 candidate 执行（candidate 携带该
+  provider 自己注册的 upstream id，废除前置 first-match 改写，回归测试先行）；③
+  auto 重判路径：目标别名全冷却 → ReDecide（deep/bg 永不重判；routine 在
+  Routine ↔ LongContextTarget 间换目标，跳过不可用/当前）→ 改写 body → 重
+  acquire，known() 的 404-vs-429 语义保持；④ gate 账户级并发闸门 auto 不旁路
+  （acquirePreferred 复用同一 gate，集成测试验证 auto 排队）；⑤ M6-A 已达成
+  （复核项）。

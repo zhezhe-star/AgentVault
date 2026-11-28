@@ -120,3 +120,69 @@ func TestExtractFeatures(t *testing.T) {
 		t.Fatal("plain body must not signal deep")
 	}
 }
+
+// TestDecideSticky pins the cache-affinity principle (design §8): a
+// healthy session binding keeps the request on its model; drifting to a
+// different model prices the prefix-cache loss into the decision.
+func TestDecideSticky(t *testing.T) {
+	targets := DefaultTargets()
+
+	// Bound model == fresh pick: pure sticky note, no rebind cost.
+	d := Decide(EntrypointAuto, Request{BoundModel: "glm-5.3-flash"}, nil, targets)
+	if d.TargetModel != "glm-5.3-flash" || d.CacheRebind != 0 {
+		t.Fatalf("sticky same-model: %+v", d)
+	}
+	if !contains(d.Reason, "sticky session kept") {
+		t.Fatalf("reason: %q", d.Reason)
+	}
+
+	// Bound model differs from the fresh pick (deep upgrade): the bound
+	// model wins (跳过重选) but the rebind cost is recorded and auditable.
+	req := Request{Thinking: true, BoundModel: "glm-5.3-flash", ContextChars: 4000}
+	d = Decide(EntrypointDeep, req, nil, targets)
+	if d.TargetModel != "glm-5.3-flash" {
+		t.Fatalf("bound model must win over fresh pick: %+v", d)
+	}
+	if d.CacheRebind != 1000 { // 4000 chars / 4
+		t.Fatalf("cache rebind cost = %d, want 1000", d.CacheRebind)
+	}
+	if !contains(d.MatchedRule, "/rebind") || !contains(d.Reason, "cache rebind") {
+		t.Fatalf("rebind not annotated: %+v", d)
+	}
+
+	// No binding: untouched behavior.
+	d = Decide(EntrypointDeep, Request{Thinking: true}, nil, targets)
+	if d.TargetModel != "glm-5.4" || d.CacheRebind != 0 {
+		t.Fatalf("no binding: %+v", d)
+	}
+}
+
+// TestReDecide walks the §10-3 re-decision table: deep never re-routes
+// (blacklist), background has a single in-plan target, routine falls back
+// between its aliases.
+func TestReDecide(t *testing.T) {
+	targets := DefaultTargets()
+
+	deep := Decide(EntrypointDeep, Request{Thinking: true}, nil, targets)
+	if _, ok := ReDecide(deep, targets, "glm-5.4"); ok {
+		t.Fatal("deep must never re-route on cooldown")
+	}
+	bg := Decide(EntrypointBG, Request{}, nil, targets)
+	if _, ok := ReDecide(bg, targets, "glm-5.3-flash"); ok {
+		t.Fatal("background has no alternative in-plan target")
+	}
+	rt := Decide(EntrypointAuto, Request{}, nil, targets)
+	nd, ok := ReDecide(rt, targets, "glm-5.3-flash")
+	if !ok || nd.TargetModel != targets.LongContextTarget {
+		t.Fatalf("routine fallback: ok=%v %+v", ok, nd)
+	}
+	if !contains(nd.MatchedRule, "/redecide") || !contains(nd.Reason, "re-decided") {
+		t.Fatalf("redecide not annotated: %+v", nd)
+	}
+	// Long-context target cooling: fall back to the base routine alias.
+	rtLong := Decide(EntrypointAuto, Request{ContextChars: LongContextTokens * 8}, nil, targets)
+	nd, ok = ReDecide(rtLong, targets, targets.LongContextTarget)
+	if !ok || nd.TargetModel != targets.Routine {
+		t.Fatalf("long-context fallback: ok=%v %+v", ok, nd)
+	}
+}

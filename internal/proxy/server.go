@@ -65,6 +65,9 @@ type Server struct {
 	// deepSeekStatus reports the cached DeepSeek is_available probe (ok
 	// false = never probed, e.g. quota polling disabled).
 	deepSeekStatus func() (auto.DeepSeekStatus, bool)
+	// affinity is the in-memory session → (provider, key, model) binding
+	// table for cache affinity (design §8); nil = disabled (tests).
+	affinity *sessionAffinity
 }
 
 // SetQuotaSource installs the plan-usage reader consulted by the auto
@@ -102,6 +105,15 @@ func (s *Server) planUsedPct() float64 {
 // the plans table, -1 when unknown; serve installs it as the quota source.
 func (s *Server) PlanUsedPct() float64 { return s.planUsedPct() }
 
+// SetAffinityTTL overrides the session-binding TTL (serve flag; tests).
+func (s *Server) SetAffinityTTL(d time.Duration) {
+	if s.affinity != nil {
+		s.affinity.mu.Lock()
+		s.affinity.ttl = d
+		s.affinity.mu.Unlock()
+	}
+}
+
 // SetQueueTimeout overrides the FIFO queue wait budget (serve flag).
 func (s *Server) SetQueueTimeout(d time.Duration) { s.queueTimeout = d }
 
@@ -137,17 +149,100 @@ type autoDecisionKey struct{}
 
 // resolveAuto rewrites an auto-tier entrypoint request to its target alias
 // and returns the enriched request plus the decision (nil for explicit
-// aliases, which pass through untouched). The rules table is always the
-// defaults in M6-A: quota awareness and owner-confirmed overflow arrive
-// with M6-3/M6-6, so Decide only picks the in-plan GLM target.
-func resolveAuto(r *http.Request, body []byte, model string) (*http.Request, *auto.Decision) {
+// aliases, which pass through untouched). boundModel is a healthy session
+// affinity binding ("" when none) fed into the decision's sticky logic.
+// The rules table is always the defaults in M6-A: quota awareness and
+// owner-confirmed overflow arrive with M6-3/M6-6, so Decide only picks the
+// in-plan GLM target.
+func resolveAuto(r *http.Request, body []byte, model, boundModel string) (*http.Request, *auto.Decision) {
 	if !auto.IsEntrypoint(model) {
 		// Explicit alias = the escape hatch (design §3a): forward as-is,
 		// tag the usage record via_manual.
 		return r.WithContext(context.WithValue(r.Context(), autoDecisionKey{}, &auto.Decision{MatchedRule: "explicit-alias"})), nil
 	}
-	d := auto.Decide(model, auto.ExtractFeatures(body, model), nil, auto.DefaultTargets())
+	features := auto.ExtractFeatures(body, model)
+	features.BoundModel = boundModel
+	d := auto.Decide(model, features, nil, auto.DefaultTargets())
 	return r.WithContext(context.WithValue(r.Context(), autoDecisionKey{}, &d)), &d
+}
+
+// autoRoute carries the per-request routing context shared by the
+// passthrough and Responses loops: the session id, an affinity provider
+// preference, the auto decision (nil for explicit aliases) and whether the
+// §10-3 re-decision path already ran.
+type autoRoute struct {
+	session        string
+	bound          affinityBinding
+	preferProvider string
+	decision       *auto.Decision
+	redecided      bool
+}
+
+// planAuto computes the session affinity lookup for a request (before
+// resolveAuto, so the healthy binding feeds the sticky decision).
+func (s *Server) planAuto(r *http.Request) *autoRoute {
+	ar := &autoRoute{}
+	if s.affinity == nil {
+		return ar
+	}
+	ar.session = SessionID(r.Header)
+	if ar.session == "" {
+		return ar
+	}
+	if b, ok := s.affinity.lookup(ar.session); ok {
+		ar.bound = b
+		ar.preferProvider = b.providerID
+	}
+	return ar
+}
+
+// resolve applies the decision to the request: quota annotation, target
+// model rewrite. Returns the new body (or the original when the decision
+// is nil / the rewrite is a no-op).
+func (ar *autoRoute) resolve(s *Server, r *http.Request, body []byte, model string) (*http.Request, string, []byte) {
+	r, decision := resolveAuto(r, body, model, ar.bound.model)
+	ar.decision = decision
+	if decision != nil {
+		s.annotateQuota(decision)
+		model = decision.TargetModel
+		if nb, err := rewriteModelField(body, model); err == nil {
+			body = nb
+		}
+	}
+	return r, model, body
+}
+
+// onNoCandidate handles the auto re-decision path (design §10 item 3):
+// the target alias just failed to pick with every serving key cooling
+// down. Deep never re-routes; routine may fall back between its in-plan
+// aliases. Returns the new body when the caller should retry the acquire
+// loop, ok=false to fall through to the normal 404/429 answers (which
+// keeps known()'s semantics honest for whatever we still cannot serve).
+func (ar *autoRoute) onNoCandidate(body []byte, model string) ([]byte, string, bool) {
+	if ar.decision == nil || ar.redecided {
+		return nil, model, false
+	}
+	ar.redecided = true
+	nd, ok := auto.ReDecide(*ar.decision, auto.DefaultTargets(), model)
+	if !ok {
+		return nil, model, false
+	}
+	*ar.decision = nd
+	if nb, err := rewriteModelField(body, nd.TargetModel); err != nil {
+		return nil, model, false
+	} else {
+		body = nb
+	}
+	return body, nd.TargetModel, true
+}
+
+// onBind records the session's sticky binding after a successful upstream
+// attempt (auto decisions only; explicit aliases keep pure passthrough).
+func (ar *autoRoute) onBind(s *Server, route candidate, model string) {
+	if ar.decision == nil || s.affinity == nil || ar.session == "" {
+		return
+	}
+	s.affinity.bind(ar.session, route.providerID, route.keyID, model)
 }
 
 // annotateQuota stamps the quota band onto a decision (called after
@@ -166,6 +261,7 @@ func (s *Server) recordUsageCtx(ctx context.Context, r usage.Record) {
 		r.TaskTier = string(d.Tier)
 		r.MatchedRule = d.MatchedRule
 		r.DecisionReason = d.Reason
+		r.CacheRebindCost = d.CacheRebind
 		if d.MatchedRule == "explicit-alias" {
 			r.ViaManual = true
 		}
@@ -186,6 +282,7 @@ func New(store *provider.Store, sec secret.Store, service string) *Server {
 		logger:       func(_ RequestLog) {},
 		queueTimeout: DefaultQueueTimeout,
 	}
+	s.affinity = newSessionAffinity(s.router, DefaultAffinityTTL)
 	s.mux.HandleFunc("/v1/chat/completions", s.handleChat)
 	s.mux.HandleFunc("/v1/responses", s.handleResponses)
 	s.mux.HandleFunc("/v1/messages", s.handleMessages)
@@ -370,34 +467,26 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, wireFlavor wire
 	// rows: resolve the target alias up front and run the rest of the
 	// normal chain (upstream rewrite, acquire, failover) on the resolved
 	// name. Explicit aliases keep the passthrough contract untouched.
-	r, decision := resolveAuto(r, body, req.Model)
-	if decision != nil {
-		s.annotateQuota(decision)
-		req.Model = decision.TargetModel
-		if nb, err := rewriteModelField(body, req.Model); err == nil {
-			body = nb
-		}
-	}
-
-	// Providers only know their own model ids: rewrite the body's model
-	// field to the registered upstream id before forwarding so alias rows
-	// in the models table actually re-map requests (no-op for 1:1 names).
-	if mapped := s.router.upstreamName(req.Model); mapped != "" && mapped != req.Model {
-		if nb, err := rewriteModelField(body, mapped); err == nil {
-			body = nb
-		}
-	}
+	ar := s.planAuto(r)
+	r, req.Model, body = ar.resolve(s, r, body, req.Model)
 
 	// Try candidates in order: on 429/5xx cool the key down and fail over
-	// to the next one within the same request.
+	// to the next one within the same request. The alias→upstream id
+	// rewrite happens per picked candidate (design §10 item 2), not
+	// pre-pick: one alias may be registered under several providers with
+	// different upstream ids.
 	attempted := 0
 	var lastStatus int
 	var lastBody []byte
 	var lastRoute candidate
 	for {
-		route, release, st := s.router.acquire(r.Context(), req.Model, s.queueTimeout)
+		route, release, st := s.router.acquirePreferred(r.Context(), req.Model, s.queueTimeout, ar.preferProvider)
 		switch st {
 		case acquireNoCandidate:
+			if nb, nm, retry := ar.onNoCandidate(body, req.Model); retry {
+				body, req.Model = nb, nm
+				continue
+			}
 			if attempted == 0 && !s.router.known(req.Model) {
 				writeError(w, http.StatusNotFound, "no active key serves model "+req.Model)
 			} else if attempted == 0 {
@@ -479,8 +568,17 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, wireFlavor wire
 					return false
 				}
 			}
+			// Per-candidate alias rewrite (design §10 item 2): the picked
+			// provider's own registered upstream id, never a first match.
+			upBody := body
+			if route.upstream != "" && route.upstream != req.Model {
+				nb, err := rewriteModelField(body, route.upstream)
+				if err == nil {
+					upBody = nb
+				}
+			}
 			upstreamURL := strings.TrimRight(base, "/") + wireFlavor.upstreamPath
-			upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(body))
+			upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(upBody))
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "build upstream request")
 				return false
@@ -513,6 +611,7 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, wireFlavor wire
 				return true
 			}
 			s.router.success(route)
+			ar.onBind(s, route, req.Model)
 
 			// Copy upstream response headers and stream the body through (SSE
 			// transparently included: no buffering beyond header flush). A

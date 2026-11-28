@@ -48,6 +48,7 @@ func serveCmd() *cobra.Command {
 	var quotaPoll bool
 	var quotaProvider string
 	var deepseekProvider string
+	var affinityTTL time.Duration
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Start the local proxy and control-plane console (loopback only)",
@@ -64,6 +65,7 @@ func serveCmd() *cobra.Command {
 				QuotaPoll:        quotaPoll,
 				QuotaProvider:    quotaProvider,
 				DeepSeekProvider: deepseekProvider,
+				AffinityTTL:      affinityTTL,
 			}
 			if daemon {
 				return spawnDaemon(cfg, addr, opts)
@@ -81,6 +83,8 @@ func serveCmd() *cobra.Command {
 		"provider id whose first active key authenticates the quota endpoint")
 	cmd.Flags().StringVar(&deepseekProvider, "deepseek-provider", "deepseek",
 		"provider id whose first active key authenticates the DeepSeek balance probe")
+	cmd.Flags().DurationVar(&affinityTTL, "affinity-ttl", proxy.DefaultAffinityTTL,
+		"session cache-affinity binding TTL (e.g. 2h); 0 resets to the default")
 	return cmd
 }
 
@@ -90,6 +94,7 @@ type serveOptions struct {
 	QuotaPoll        bool
 	QuotaProvider    string
 	DeepSeekProvider string
+	AffinityTTL      time.Duration
 }
 
 func (o serveOptions) execArgs(addr string) []string {
@@ -97,7 +102,8 @@ func (o serveOptions) execArgs(addr string) []string {
 		"--queue-timeout", o.QueueTimeout.String(),
 		"--quota-poll=" + strconv.FormatBool(o.QuotaPoll),
 		"--quota-provider", o.QuotaProvider,
-		"--deepseek-provider", o.DeepSeekProvider}
+		"--deepseek-provider", o.DeepSeekProvider,
+		"--affinity-ttl", o.AffinityTTL.String()}
 }
 
 // spawnDaemon re-executes this binary with --daemon detached, writing the
@@ -142,6 +148,9 @@ func runProxy(cfg app.Config, addr string, opts serveOptions) error {
 
 	proxySrv := proxy.New(store, cfg.Secret, cfg.Service)
 	proxySrv.SetQueueTimeout(opts.QueueTimeout)
+	if opts.AffinityTTL > 0 {
+		proxySrv.SetAffinityTTL(opts.AffinityTTL)
+	}
 	proxySrv.EnableUsage(usageStore)
 	proxySrv.EnableQuotas(store, usageStore)
 	proxySrv.SetUsageSink(func(r usage.Record) {
