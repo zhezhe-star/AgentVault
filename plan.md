@@ -190,3 +190,36 @@ shell rc 注释化）、`agentvault run` 环境变量注入（MCP/工具凭据�
   acquire，known() 的 404-vs-429 语义保持；④ gate 账户级并发闸门 auto 不旁路
   （acquirePreferred 复用同一 gate，集成测试验证 auto 排队）；⑤ M6-A 已达成
   （复核项）。
+
+### M6-C 实施注记（2026-11-28）
+
+- **M6-6 owner 决策通道（§7/e247）**：migration 8 追加 pending_decision 表（只
+  追加）；internal/provider/pending.go 全套 CRUD（Create/List/Get/HasOpen
+  去重/Decide 单条仅从 pending 态/DecideAll/Count）；proxy 侧 resolveOverflow
+  = 软档触发（elevated 仅 bg、critical bg+routine、deep 永不）→ deepseek 可用
+  性门（vault 行 + active key + probe 反证）→ HasOpenPending 去重 → 落库
+  （EstTokens=ContextChars/4，EstCost=tokens/1e6×$0.27 仅展示）→ 事件文件追加
+  （internal/auto/events.go，JSONL 0600 只含元数据）。e239：请求本体永不溢出，
+  pending 未决按不溢出继续走 GLM；deepseek 不可用降级为 reason 注记不出
+  pending。CLI：agentvault auto pending/approve <id|all>/deny <id>（决策同时
+  写事件）。Console：/console/api/pending GET 列表 + POST
+  {"decision","id"}（id 为数字或 "all"），static/index.html 加待决策卡片
+  （批准/拒绝按钮）。
+- **M6-7 错峰窗口（§9）**：internal/auto/offpeak.go——LiteLLM 风格
+  hours_utc "H-H"（跨午夜 22-2 合法；Start==End 判配置错误 parse 拒绝，保证
+  fail-safe 方向是标准档而非全日闲时）、weekdays 0=日..6=六、IANA
+  weekday_timezone；内置默认 GLM 周一至五 14-18 UTC+8、DeepSeek 周一至五
+  9-12 + 14-18 UTC+8（含周末即闲时）；--offpeak-config 缺省=内置默认，文件
+  缺失=默认，解析错误=serve 侧降级空窗口（闲时关停）。off_peak(bool) 落
+  usage（M6-A 预留列启用）与响应头；闲时放宽 = router offPeakBoost 钩子，
+  serve 装 --offpeak-concurrency-factor（默认 1.5，>=1 校验），仅作用于
+  QuotaProvider（GLM）且 glmOffPeak 时 effective limit×factor，per-pick 求值
+  （窗口开合无需动 gate），limit<=0（不限）恒 0。
+- **M6-8 观测面（§11）**：响应头 x-agentvault-route（provider/upstream，
+  全请求）、x-agentvault-decision（tier:rule 缩写）、x-agentvault-off-peak
+  （仅入口请求），autoRoute.stampHeaders 在 WriteHeader 前统一打；
+  /admin/routing 增 auto 面板 {requests{tier:count}, overflow_candidates,
+  pending}；usage off_peak 由 recordUsageCtx 从 decision 透传。
+- serve 面：--events-path（默认 <data-dir>/auto-events.jsonl）、
+  --offpeak-config、--offpeak-concurrency-factor 均经 serveOptions/execArgs
+  daemon 透传；SetDeepSeekProvider 接 --deepseek-provider。

@@ -93,6 +93,57 @@ func Handler(store *provider.Store, usageStore *usage.Store, keyRef func(provide
 		_ = json.NewEncoder(w).Encode(out)
 	})
 
+	// Owner decision channel (design §7): the console is the third face.
+	// GET lists the candidates awaiting a decision; POST completes one
+	// ({"decision":"approve"|"deny","id":N} or "id":"all").
+	mux.HandleFunc("/console/api/pending", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodGet:
+			list, err := store.ListPendingDecisions(provider.PendingOpen)
+			if err != nil {
+				http.Error(w, "list pending", http.StatusInternalServerError)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"pending": list})
+		case http.MethodPost:
+			var req struct {
+				Decision string `json:"decision"`
+				ID       any    `json:"id"` // number or "all"
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, "bad request body", http.StatusBadRequest)
+				return
+			}
+			status := map[string]string{"approve": provider.PendingApproved, "deny": provider.PendingDenied}[req.Decision]
+			if status == "" {
+				http.Error(w, `decision must be "approve" or "deny"`, http.StatusBadRequest)
+				return
+			}
+			if s, ok := req.ID.(string); ok && s == "all" {
+				n, err := store.DecideAllPending(status)
+				if err != nil {
+					http.Error(w, "decide all", http.StatusInternalServerError)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"decided": n, "decision": status})
+				return
+			}
+			f, ok := req.ID.(float64) // json numbers decode as float64 into any
+			if !ok {
+				http.Error(w, `id must be a number or "all"`, http.StatusBadRequest)
+				return
+			}
+			if err := store.DecidePending(int64(f), status); err != nil {
+				http.Error(w, "decide", http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"decided": 1, "decision": status})
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
 	sub, err := fs.Sub(staticFiles, "static")
 	if err != nil {
 		panic("console: embedded static fs: " + err.Error())

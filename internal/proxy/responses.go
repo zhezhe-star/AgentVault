@@ -668,6 +668,7 @@ func (s *Server) forwardResponses(w http.ResponseWriter, r *http.Request, req *r
 			}
 			s.router.success(route)
 			ar.onBind(s, route, req.Model)
+			ar.stampHeaders(w, route, req.Model)
 			s.deliverResponses(w, r.Context(), req, resp, route, start, protocol)
 			return false
 		}() {

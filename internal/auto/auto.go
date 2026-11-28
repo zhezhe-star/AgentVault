@@ -188,8 +188,22 @@ type Decision struct {
 	MatchedRule   string
 	Reason        string
 	PinnedTier    bool  // entrypoint pinned the tier; classification skipped
-	NeedsOverflow bool  // always false in M6-A (overflow is M6-6, owner-gated)
+	NeedsOverflow bool  // M6-C: true when an overflow candidate was filed for the owner (§7)
+	OffPeak       bool  // M6-C §9: request landed in the provider's off-peak window
 	CacheRebind   int64 // est. context tokens whose prefix cache is lost (0 = sticky)
+}
+
+// OverflowTarget is the owner-confirmed overflow destination (design §5a,
+// e239): DeepSeek is only ever reached after a pending_decision is
+// approved — the gateway has no automatic overflow path.
+type OverflowTarget struct {
+	Provider string
+	Model    string
+}
+
+// DefaultOverflowTarget is the v1 overflow destination.
+func DefaultOverflowTarget() OverflowTarget {
+	return OverflowTarget{Provider: "deepseek", Model: "deepseek-chat"}
 }
 
 // Decide maps an entrypoint request onto a target model. Pinned
@@ -284,6 +298,21 @@ func QuotaBand(usedPct float64) string {
 	default:
 		return BandHealthy
 	}
+}
+
+// OverflowEligible reports whether the tier + quota-band combination may
+// file an owner-confirmation candidate (design §5 step 4: 70–95% elevates
+// background only; >95% elevates background and routine; deep never
+// requests — it rides GLM until the hard limit). e239: filing a candidate
+// is as far as automation ever goes; the switch itself needs approval.
+func OverflowEligible(tier Tier, band string) bool {
+	switch band {
+	case BandElevated:
+		return tier == TierBackground
+	case BandCritical:
+		return tier == TierBackground || tier == TierRoutine
+	}
+	return false
 }
 
 // AnnotateQuota appends the quota band to a decision's reason (no target
